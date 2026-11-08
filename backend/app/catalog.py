@@ -10,19 +10,12 @@ DATA = ROOT / "data"
 REGISTRY = json.loads((DATA / "reference" / "locations.json").read_text())
 LOCATIONS = {row["id"]: row for row in REGISTRY["locations"]}
 WEATHER_FILE = DATA / "samples" / "weather_era5_sample.csv"
-FACILITY_FILE = DATA / "samples" / "facilities_osm_sample.csv"
 
 
 def weather_frame() -> pd.DataFrame:
     if not WEATHER_FILE.exists():
         return pd.DataFrame(columns=["location_id", "date", "model", "temperature_mean_c", "temperature_min_c", "temperature_max_c", "precipitation_mm", "wind_speed_max_kmh"])
     return pd.read_csv(WEATHER_FILE)
-
-
-def facility_frame() -> pd.DataFrame:
-    if not FACILITY_FILE.exists():
-        return pd.DataFrame(columns=["osm_type", "osm_id", "name", "category", "latitude", "longitude", "province", "region", "snapshot_date", "source_tags"])
-    return pd.read_csv(FACILITY_FILE)
 
 
 def manifest(kind: str) -> dict:

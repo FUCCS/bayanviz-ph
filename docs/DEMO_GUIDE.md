@@ -1,12 +1,13 @@
 # Demo guide
 
-1. Open Dashboard and read the real-data and partial-coverage statuses.
-2. Select Negros Oriental or another sample area and click Apply Filters. Seven Chapter 08 cards recompute in Python.
-3. Click Show Python Code on a chart. The same chart remains beside the actual builder, preparation code, and course notes. Download the script or reproduction package.
-4. Click Data Interpretation. The same result remains beside its facts, limitations, and evidence table.
-5. Open Map Explorer for the Chapter 09 Folium map. OSM attribution stays visible.
-6. In API Sources, fetch up to 367 days of ERA5 observations, then click Use in Dashboard and Apply Filters.
-7. In Dataset Upload, preview a compatible file, map fields, and click Use in Dashboard. The downloadable schema examples have illustrative values.
-8. Click Clear My Data to remove temporary uploads and results.
+1. Open Overview. Read the Prepared Real Dataset and partial-coverage labels.
+2. Select the Negros Oriental preset. Use calendar dates or the range sliders within the loaded 2024–2025 data, then Apply Filters. The eight indicators and climate charts recalculate.
+3. Open Data Relationships. Compare temperature with rainfall and rainfall with wind. Change daily versus monthly pairing, apply, and inspect Pearson r and paired counts.
+4. Click Show Python Code on a chart. The chart remains beside the actual builder, preparation code, and course notes. Download a script or reproduction package.
+5. Click Data Interpretation for the same chart, calculated findings, limitations, and evidence table.
+6. Open Geographic Explorer. Folium shows temperature-colored markers and rainfall-sized circles for the selected period. OpenStreetMap attribution remains visible.
+7. In API Sources, fetch up to 367 days from Open-Meteo, preview actual returned dates and fields, and click Use Dataset. The date controls rebind to those records.
+8. In Dataset Upload, preview a compatible climate file, map its fields, and click Use Dataset. Other visitors cannot see the file.
+9. Clear My Data to remove temporary uploads and results.
 
-The snapshot is partial. Weather for 2024–2025 and current OSM features have different reference dates. The OSM query is a set of city vicinities, not verified province boundaries.
+The bundled 2024–2025 data represent five sample points only. No nationwide inference follows from this presentation subset.

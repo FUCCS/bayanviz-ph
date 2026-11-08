@@ -1,2 +1,0 @@
-osm_type,osm_id,name,category,latitude,longitude,province,region,snapshot_date,source_tags
-node,123456,Illustrative school,school,9.3068,123.3054,Negros Oriental,Negros Island Region,2025-01-01,"{""amenity"":""school""}"

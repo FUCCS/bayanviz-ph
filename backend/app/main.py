@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import io
 import json
 import os
@@ -17,10 +18,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from .catalog import LOCATIONS, REGISTRY, WEATHER_FILE, FACILITY_FILE, facility_frame, manifest, weather_frame
+from .catalog import LOCATIONS, manifest, weather_frame
 from .charts import PALETTE, REGISTRY as CHARTS, code_for, interpretation, prepare_chart, render_chart
 from .connectors import fetch_weather
-from .processing import classify_osm_tags, filter_hash, prepare_facilities, prepare_weather
+from .processing import MIN_PERIOD_COVERAGE, RAINY_DAY_MM, WEATHER_COLUMNS, climate_summary, date_bounds, filter_hash, filter_weather, period_table, prepare_weather, safe_number
 
 app = FastAPI(title="BayanViz PH API", version="0.1.0")
 origins = [s.strip() for s in os.getenv("FRONTEND_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if s.strip()]
@@ -58,11 +59,11 @@ class FetchRequest(BaseModel):
     locations: list[str] = Field(min_length=1, max_length=3)
     start_date: date
     end_date: date
+    variables: list[str] = Field(default_factory=lambda: WEATHER_COLUMNS.copy())
 
 
 class UseUploadRequest(BaseModel):
     upload_id: str
-    kind: str
     mapping: dict[str, str] = Field(default_factory=dict)
 
 
@@ -72,9 +73,16 @@ class AnalysisRequest(BaseModel):
     locations: list[str] = Field(default_factory=list)
     start_date: date | None = None
     end_date: date | None = None
-    categories: list[str] = Field(default_factory=list)
     variable: str = "temperature_mean_c"
     aggregation: str = "annual"
+    relationship_aggregation: str = "daily"
+
+
+class ScopeRequest(BaseModel):
+    source: str = "curated"
+    locations: list[str] = Field(default_factory=list)
+    start_date: date | None = None
+    end_date: date | None = None
 
 
 @app.get("/api/health")
@@ -86,7 +94,7 @@ def health():
 def start_session():
     prune()
     token = secrets.token_urlsafe(32)
-    sessions[token] = {"expires": time.time() + SESSION_TTL, "uploads": {}, "weather": None, "facilities": None, "weather_source": None, "facilities_source": None, "requests": []}
+    sessions[token] = {"expires": time.time() + SESSION_TTL, "uploads": {}, "weather": None, "weather_source": None, "retrieved_at": None, "requests": []}
     return {"session_id": token, "expires_in_seconds": SESSION_TTL}
 
 
@@ -103,10 +111,10 @@ def clear_session(auth=Depends(session)):
 @app.get("/api/catalog")
 def catalog():
     return {
-        "name": "BayanViz PH", "subtitle": "Philippine Climate and Infrastructure Analytics",
+        "name": "BayanViz PH", "subtitle": "Philippine Historical Climate Data Analytics",
         "locations": list(LOCATIONS.values()),
         "charts": [{"id": key, "chapter": row[0], "topic": row[1], "function": row[2], "objective": row[3], "needs": row[5]} for key, row in CHARTS.items()],
-        "categories": ["pharmacy", "clinic", "bank", "atm", "retail", "school"],
+        "variables": WEATHER_COLUMNS,
         "upload_limit_mb": MAX_UPLOAD_MB, "upload_limit_rows": MAX_UPLOAD_ROWS,
         "upload_limit_columns": MAX_UPLOAD_COLUMNS, "uploads_per_session": MAX_UPLOADS_PER_SESSION,
     }
@@ -115,23 +123,96 @@ def catalog():
 @app.get("/api/sources")
 def sources():
     weather = weather_frame()
-    facilities = facility_frame()
     prepared = prepare_weather(weather)
     quality = {
         "valid_temperature_records": int(prepared.temperature_mean_c.notna().sum()),
         "missing_temperature_records": int(prepared.temperature_mean_c.isna().sum()),
         "flagged_weather_outliers": int(prepared.outlier_flag.sum()),
-        "unassigned_facilities": int(facilities.province.isna().sum() + facilities.province.eq("").sum()),
-        "area_assignment": "nearest registered center; administrative boundaries not validated",
     }
     return {
         "weather": {"status": "Prepared Real Dataset" if len(weather) else "Unavailable", "records": len(weather), "manifest": manifest("weather")},
-        "facilities": {"status": "Prepared Real Dataset" if len(facilities) else "Unavailable", "records": len(facilities), "manifest": manifest("facilities")},
-        "live_weather": {"status": "Live API", "provider": "Open-Meteo Historical Weather", "model": "ERA5", "interactive_max_days": 367, "interactive_max_locations": 3},
-        "live_osm": {"status": "Unavailable", "reason": "Interactive OSM connector is disabled; use the prepared snapshot or upload an export."},
-        "coverage": "Partial coverage — registered sample points and any loaded OSM snapshot only. No national completeness claim.",
+        "live_weather": {"status": "Live API", "provider": "Open-Meteo Historical Weather", "model": "ERA5", "interactive_max_days": 367, "interactive_max_locations": 3, "supported_period": ["2010-01-01", "2025-12-31"]},
+        "coverage": "Partial coverage — five registered representative weather points in the prepared snapshot, 2024–2025.",
         "quality": quality,
     }
+
+
+def selected_weather(source: str, state: dict) -> tuple[pd.DataFrame, str, dict]:
+    if source not in {"curated", "session"}:
+        raise ValueError("Choose the prepared or session dataset")
+    if source == "session" and state["weather"] is not None:
+        return state["weather"].copy(), state["weather_source"], {"retrieved_at_utc": state["retrieved_at"]}
+    return prepare_weather(weather_frame()), "Prepared Real Dataset", manifest("weather")
+
+
+@app.post("/api/dataset")
+def dataset(request: ScopeRequest, auth=Depends(session)):
+    _, state = auth
+    try:
+        weather, status, metadata = selected_weather(request.source, state)
+        unknown = set(request.locations) - set(weather.location_id.unique())
+        if unknown:
+            raise ValueError(f"Locations are absent from the selected dataset: {', '.join(sorted(unknown))}")
+        bounds = date_bounds(weather, request.locations)
+        subset = weather[weather.location_id.isin(request.locations)] if request.locations else weather
+        if request.start_date:
+            subset = subset[subset.date.ge(pd.Timestamp(request.start_date))]
+        if request.end_date:
+            subset = subset[subset.date.le(pd.Timestamp(request.end_date))]
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    variables = [name for name in WEATHER_COLUMNS if weather[name].notna().any()]
+    return {**bounds, "available_locations": sorted(weather.location_id.unique().tolist()), "selected_observations": len(subset), "selected_valid_temperature": int(subset.temperature_mean_c.count()), "selected_valid_rainfall": int(subset.precipitation_mm.count()), "source": status, "variables": variables, "retrieved_at": metadata.get("retrieved_at_utc"), "model": sorted(weather.model.unique().tolist())}
+
+
+@app.post("/api/summary")
+def summary(request: ScopeRequest, auth=Depends(session)):
+    _, state = auth
+    try:
+        weather, status, metadata = selected_weather(request.source, state)
+        selected = filter_weather(weather, request.locations, str(request.start_date) if request.start_date else None, str(request.end_date) if request.end_date else None)
+        bounds = date_bounds(weather, request.locations)
+        reference = weather[weather.location_id.isin(request.locations)] if request.locations else weather
+        return climate_summary(selected, str(request.start_date or bounds["min_date"]), str(request.end_date or bounds["max_date"]), metadata, status, reference)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/summary/code")
+def summary_code(request: ScopeRequest, auth=Depends(session)):
+    result = summary(request, auth)
+    return {"source": inspect.getsource(climate_summary), "preparation": inspect.getsource(period_table), "summary": result}
+
+
+@app.post("/api/summary/package")
+def summary_package(request: ScopeRequest, auth=Depends(session)):
+    _, state = auth
+    result = summary(request, auth)
+    weather, status, metadata = selected_weather(request.source, state)
+    selected = filter_weather(weather, request.locations, str(request.start_date) if request.start_date else None, str(request.end_date) if request.end_date else None)
+    reference = weather[weather.location_id.isin(request.locations)] if request.locations else weather
+    script = "import calendar\nimport json\nimport numpy as np\nimport pandas as pd\n\n"
+    script += f"RAINY_DAY_MM = {RAINY_DAY_MM!r}\nMIN_PERIOD_COVERAGE = {MIN_PERIOD_COVERAGE!r}\n\n"
+    script += inspect.getsource(safe_number) + "\n" + inspect.getsource(period_table) + "\n" + inspect.getsource(climate_summary) + "\n"
+    script += "weather = pd.read_csv('weather_input.csv', parse_dates=['date'])\nreference = pd.read_csv('reference.csv', parse_dates=['date'])\n"
+    script += f"result = climate_summary(weather, {result['selected_period'][0]!r}, {result['selected_period'][1]!r}, {metadata!r}, {status!r}, reference)\n"
+    script += "print(json.dumps(result, indent=2))\n"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("reproduce_summary.py", script)
+        archive.writestr("weather_input.csv", selected.to_csv(index=False))
+        archive.writestr("reference.csv", reference.to_csv(index=False))
+        archive.writestr("README.json", json.dumps({"filters": request.model_dump(mode="json"), "source": status, "model": result["model"], "note": "Run python reproduce_summary.py after installing pandas and numpy."}, indent=2))
+        archive.writestr("requirements.txt", "pandas\nnumpy\n")
+    return Response(buffer.getvalue(), media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="climate-summary-reproduction.zip"'})
+
+
+@app.post("/api/summary/script")
+def summary_script(request: ScopeRequest, auth=Depends(session)):
+    package = summary_package(request, auth)
+    with zipfile.ZipFile(io.BytesIO(package.body)) as archive:
+        script = archive.read("reproduce_summary.py")
+    return Response(script, media_type="text/x-python", headers={"Content-Disposition": 'attachment; filename="reproduce_summary.py"'})
 
 
 @app.post("/api/fetch/weather")
@@ -141,14 +222,18 @@ async def fetch(request: FetchRequest, auth=Depends(session)):
         raise HTTPException(429, "Session request limit reached")
     state["requests"].append(time.time())
     try:
-        frame, errors, cache_hits = await fetch_weather(request.locations, request.start_date, request.end_date)
+        if not request.variables or set(request.variables) - set(WEATHER_COLUMNS):
+            raise ValueError("Select one or more supported climate variables")
+        frame, errors, cache_hits = await fetch_weather(request.locations, request.start_date, request.end_date, request.variables)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if frame.empty:
         raise HTTPException(502, {"message": "Provider returned no usable locations", "errors": errors})
     state["weather"] = prepare_weather(frame)
     state["weather_source"] = "Cached API" if cache_hits == len(request.locations) else "Live API"
-    return {"status": state["weather_source"], "records": len(frame), "errors": errors, "cache_hits": cache_hits, "preview": frame.head(8).to_dict("records"), "retrieved_at": datetime.now(timezone.utc).isoformat(), "observation_period": [str(request.start_date), str(request.end_date)]}
+    state["retrieved_at"] = datetime.now(timezone.utc).isoformat()
+    actual = date_bounds(state["weather"])
+    return {"status": state["weather_source"], "records": len(frame), "errors": errors, "cache_hits": cache_hits, "preview": frame.head(8).to_dict("records"), "retrieved_at": state["retrieved_at"], "observation_period": [actual["min_date"], actual["max_date"]], "variables": [name for name in WEATHER_COLUMNS if state["weather"][name].notna().any()]}
 
 
 def parse_upload(name: str, content: bytes) -> pd.DataFrame:
@@ -161,7 +246,7 @@ def parse_upload(name: str, content: bytes) -> pd.DataFrame:
         if metadata.num_rows > MAX_UPLOAD_ROWS or metadata.num_columns > MAX_UPLOAD_COLUMNS:
             raise ValueError("Parquet file exceeds row or column limits")
         return pd.read_parquet(io.BytesIO(content))
-    if suffix in (".json", ".geojson"):
+    if suffix == ".json":
         payload = json.loads(content)
         if isinstance(payload, dict) and "daily" in payload and "time" in payload["daily"]:
             frame = pd.DataFrame(payload["daily"]).rename(columns={
@@ -174,35 +259,8 @@ def parse_upload(name: str, content: bytes) -> pd.DataFrame:
             frame["location_id"] = nearby["id"] if nearby and (nearby["latitude"] - lat)**2 + (nearby["longitude"] - lon)**2 < 0.02 else "uploaded_point"
             frame["model"] = "era5" if "era5" in str(payload.get("model", "")).lower() else "uploaded_model_unspecified"
             return frame
-        if isinstance(payload, dict) and "elements" in payload:
-            rows = []
-            for item in payload["elements"]:
-                center = item.get("center", item)
-                tags = item.get("tags", {})
-                category = classify_osm_tags(tags)
-                lat, lon = center.get("lat"), center.get("lon")
-                if lat is None or lon is None or category is None:
-                    continue
-                nearest = min(LOCATIONS.values(), key=lambda loc: (loc["latitude"] - lat)**2 + (loc["longitude"] - lon)**2)
-                if (nearest["latitude"] - lat)**2 + (nearest["longitude"] - lon)**2 > 0.02:
-                    continue
-                rows.append({"osm_type": item.get("type"), "osm_id": item.get("id"), "latitude": lat, "longitude": lon, "name": tags.get("name", ""), "source_tags": json.dumps(tags), "category": category, "province": nearest["province"], "region": nearest["region"], "assignment_method": "nearest registered center; boundary unverified"})
-            return pd.DataFrame(rows)
-        if isinstance(payload, dict) and "features" in payload:
-            rows = []
-            for feature in payload["features"]:
-                row = dict(feature.get("properties") or {})
-                geometry = feature.get("geometry") or {}
-                if geometry.get("type") != "Point":
-                    raise ValueError("Only Point GeoJSON is supported; preprocess polygons offline")
-                coordinates = geometry.get("coordinates", [])
-                if len(coordinates) < 2:
-                    raise ValueError("Point GeoJSON needs longitude and latitude")
-                row.update(longitude=coordinates[0], latitude=coordinates[1])
-                rows.append(row)
-            return pd.DataFrame(rows)
         return pd.DataFrame(payload if isinstance(payload, list) else payload.get("data", []))
-    raise ValueError("Use CSV, Parquet, GeoJSON, or supported JSON")
+    raise ValueError("Use CSV, Parquet, or supported weather JSON")
 
 
 @app.post("/api/upload/preview")
@@ -211,7 +269,7 @@ async def upload_preview(file: UploadFile = File(...), auth=Depends(session)):
     if len(state["uploads"]) >= MAX_UPLOADS_PER_SESSION:
         raise HTTPException(429, "This session has reached its upload limit; clear your data to start over")
     name = Path(file.filename or "upload").name
-    if Path(name).suffix.lower() not in {".csv", ".parquet", ".json", ".geojson"}:
+    if Path(name).suffix.lower() not in {".csv", ".parquet", ".json"}:
         raise HTTPException(400, "Unsupported file type")
     content = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(content) > MAX_UPLOAD_BYTES:
@@ -227,7 +285,9 @@ async def upload_preview(file: UploadFile = File(...), auth=Depends(session)):
     upload_id = secrets.token_urlsafe(16)
     state["uploads"][upload_id] = df
     preview = df.head(8).fillna("").astype(str).to_dict("records")
-    return {"upload_id": upload_id, "filename": name, "rows": len(df), "columns": list(df.columns), "preview": preview, "missing_by_column": {str(col): int(df[col].isna().sum()) for col in df.columns}, "required_weather": ["location_id", "date", "model"], "required_facilities": ["osm_type", "osm_id", "category", "latitude", "longitude", "province", "region"]}
+    date_column = df["date"] if "date" in df else df["time"] if "time" in df else None
+    dates = pd.to_datetime(date_column, errors="coerce").dropna() if date_column is not None else pd.Series(dtype="datetime64[ns]")
+    return {"upload_id": upload_id, "filename": name, "rows": len(df), "columns": list(df.columns), "preview": preview, "missing_by_column": {str(col): int(df[col].isna().sum()) for col in df.columns}, "required_weather": ["location_id", "date", "model"], "observation_period": [str(dates.min().date()), str(dates.max().date())] if len(dates) else None}
 
 
 @app.post("/api/upload/use")
@@ -243,46 +303,18 @@ def use_upload(request: UseUploadRequest, auth=Depends(session)):
             raise HTTPException(400, f"Source column {source} is missing")
     mapped = df.rename(columns={source: target for target, source in request.mapping.items()})
     try:
-        if request.kind == "weather":
-            cleaned = prepare_weather(mapped)
-        elif request.kind == "facilities":
-            cleaned = prepare_facilities(mapped)
-        else:
-            raise ValueError("Choose weather or facilities")
+        cleaned = prepare_weather(mapped)
     except (ValueError, KeyError) as exc:
         raise HTTPException(400, str(exc)) from exc
     count = len(cleaned)
     if not count:
         raise HTTPException(400, "No valid records remained after validation")
-    state[request.kind] = cleaned
-    state[f"{request.kind}_source"] = "Uploaded Dataset"
-    return {"status": "Uploaded Dataset", "kind": request.kind, "valid_records": count}
-
-
-def selected_tables(request: AnalysisRequest, state: dict) -> tuple[pd.DataFrame, pd.DataFrame, str, str]:
-    if request.source == "session":
-        weather = state["weather"] if state["weather"] is not None else weather_frame()
-        facilities = state["facilities"] if state["facilities"] is not None else facility_frame()
-        weather_status = state["weather_source"] or "Prepared Real Dataset"
-        facility_status = state["facilities_source"] or "Prepared Real Dataset"
-    else:
-        weather, facilities, weather_status, facility_status = weather_frame(), facility_frame(), "Prepared Real Dataset", "Prepared Real Dataset"
-    weather = prepare_weather(weather) if not weather.empty else weather
-    facilities = prepare_facilities(facilities) if not facilities.empty else facilities
-    if request.locations:
-        unknown = set(request.locations) - set(LOCATIONS)
-        if unknown:
-            raise ValueError(f"Unknown locations: {', '.join(sorted(unknown))}")
-        weather = weather[weather.location_id.isin(request.locations)]
-        selected_provinces = {LOCATIONS[key]["province"] for key in request.locations}
-        facilities = facilities[facilities.province.isin(selected_provinces)]
-    if request.start_date:
-        weather = weather[weather.date >= pd.Timestamp(request.start_date)]
-    if request.end_date:
-        weather = weather[weather.date <= pd.Timestamp(request.end_date)]
-    if request.categories:
-        facilities = facilities[facilities.category.isin(request.categories)]
-    return weather, facilities, weather_status, facility_status
+    if not any(cleaned[name].notna().any() for name in WEATHER_COLUMNS):
+        raise HTTPException(400, "No supported numeric climate measurements found")
+    state["weather"] = cleaned
+    state["weather_source"] = "Uploaded Dataset"
+    state["retrieved_at"] = datetime.now(timezone.utc).isoformat()
+    return {"status": "Uploaded Dataset", "valid_records": count, "observation_period": [str(cleaned.date.min().date()), str(cleaned.date.max().date())], "variables": [name for name in WEATHER_COLUMNS if cleaned[name].notna().any()]}
 
 
 @app.post("/api/analysis")
@@ -291,29 +323,28 @@ def analyze(request: AnalysisRequest, auth=Depends(session)):
     if request.chart_id not in CHARTS:
         raise HTTPException(404, "Unknown chart")
     try:
-        weather, facilities, weather_status, facility_status = selected_tables(request, state)
-        table, units, caveats = prepare_chart(request.chart_id, weather, facilities, request.variable, request.aggregation)
+        weather, weather_status, _ = selected_weather(request.source, state)
+        unknown = set(request.locations) - set(weather.location_id.unique())
+        if unknown:
+            raise ValueError(f"Locations are absent from the selected dataset: {', '.join(sorted(unknown))}")
+        weather = filter_weather(weather, request.locations, str(request.start_date) if request.start_date else None, str(request.end_date) if request.end_date else None)
+        table, units, caveats, facts = prepare_chart(request.chart_id, weather, request.variable, request.aggregation, request.relationship_aggregation)
         if table.empty:
             raise ValueError("No valid observations after filtering")
         figure = render_chart(request.chart_id, table)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     filters = request.model_dump(mode="json")
-    version = f"weather:{hashlib.sha256(weather.to_csv(index=False).encode()).hexdigest()[:12]};facilities:{hashlib.sha256(facilities.to_csv(index=False).encode()).hexdigest()[:12]}"
-    needs = CHARTS[request.chart_id][5]
-    status = weather_status if needs == "weather" else facility_status if needs == "facilities" else weather_status if weather_status == facility_status else f"{weather_status} + {facility_status}"
-    source_list = [status]
-    if needs in ("weather", "both") and len(weather):
-        source_list.append("Open-Meteo ERA5 reanalysis" if weather_status != "Uploaded Dataset" else "Uploaded weather dataset")
-    if needs in ("facilities", "both") and len(facilities):
-        source_list.append("© OpenStreetMap contributors" if facility_status != "Uploaded Dataset" else "Uploaded facility dataset")
+    version = f"weather:{hashlib.sha256(weather.to_csv(index=False).encode()).hexdigest()[:12]}"
+    source_list = [weather_status, "Open-Meteo ERA5 reanalysis" if weather_status != "Uploaded Dataset" else "Uploaded weather dataset"]
     result_id = secrets.token_urlsafe(24)
     record = {
         "analysis_id": result_id, "dataset_version": version, "filter_hash": filter_hash(filters), "chart_id": request.chart_id,
         "renderer": "Folium" if request.chart_id == "map" else "Plotly for Python" if request.chart_id == "treemap" else "Seaborn / Matplotlib" if request.chart_id != "mosaic" else "Statsmodels / Matplotlib",
         "figure": figure, "supporting_data": table.head(30).replace({pd.NaT: None}).to_json(orient="records", date_format="iso"),
         "supporting_columns": list(table.columns), "supporting_count": len(table),
-        "computed_facts": interpretation(request.chart_id, table, caveats), "python_source": code_for(request.chart_id),
+        "computed_facts": interpretation(request.chart_id, table, caveats, facts), "python_source": code_for(request.chart_id),
+        "statistics": facts,
         "sources": source_list,
         "limitations": caveats, "units": units, "filters": filters, "sample_size": len(table),
         "session_id": token, "expires": time.time() + SESSION_TTL, "table": table,
@@ -346,7 +377,7 @@ def reproduction_script(result: dict) -> str:
     chart_id = result["chart_id"]
     builder = CHARTS[chart_id][4]
     source = result["python_source"]["visualization"]
-    script = """import html\nimport pandas as pd\nimport numpy as np\nimport seaborn as sns\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nimport plotly.express as px\nimport folium\nfrom folium.plugins import MarkerCluster\nfrom statsmodels.graphics.mosaicplot import mosaic\n\n"""
+    script = """import html\nimport pandas as pd\nimport numpy as np\nimport seaborn as sns\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nimport plotly.express as px\nimport folium\nfrom statsmodels.graphics.mosaicplot import mosaic\n\n"""
     script += f"PALETTE = {PALETTE!r}\n\n{source}\n"
     script += f"table = pd.read_csv('chart_input.csv')\noutput = {builder.__name__}(table)\n"
     script += "output.write_html('chart.html')\n" if chart_id == "treemap" else "open('chart.html', 'w').write(output)\n" if chart_id == "map" else "output.savefig('chart.png', dpi=145, bbox_inches='tight')\n"

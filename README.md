@@ -1,12 +1,12 @@
 # BayanViz PH
 
-Philippine Climate and Infrastructure Analytics. Explore the Data. Understand the Visuals. Learn the Python.
+Philippine Historical Climate Data Analytics. Subtitle: Advanced Data Visualization and Geographic Analysis.
 
-This educational demonstration follows Chapter 08 (Advanced Data Visualization) and Chapter 09 (Map Data Analysis) of the supplied course presentation. It is not an official KOICA information service.
+This educational demonstration follows Chapter 08 (Advanced Data Visualization) and Chapter 09 (Map Data Analysis) of the supplied training presentation. It is not an official KOICA service.
 
 ## Run locally
 
-Use Python 3.14. This project's pinned Matplotlib version had no wheel for Python 3.15 on this Mac.
+Use Python 3.14 for the pinned visualization dependencies:
 
     python3.14 -m venv .venv
     .venv/bin/python -m pip install -r backend/requirements-dev.txt
@@ -18,19 +18,21 @@ In a second terminal:
     npm ci
     npm run dev
 
-Open http://127.0.0.1:5173. Use the VITE_API_BASE_URL environment variable for a nonlocal backend.
+Open http://127.0.0.1:5173. For a hosted backend, set VITE_API_BASE_URL to its verified HTTPS origin.
 
-The checked-in snapshot is partial real data: five ERA5 sample locations for 2024–2025 and a bounded OSM city-vicinity snapshot. The dashboard never claims national completeness.
+The checked-in real ERA5 snapshot contains 3,655 daily rows for five representative Visayas sample points in 2024–2025. It is partial geographic and temporal coverage, not a nationwide dataset or province-wide mean. The offline weather ingestion script supports the 2010–2025 study period for the registered points. Expand and validate the location registry before making nationwide claims.
 
 ## Test
 
-    .venv/bin/python -m pytest -q
+    MPLCONFIGDIR=/tmp/bayanviz-mpl .venv/bin/python -m pytest -q
     cd frontend && npm run test && npm run build
 
-The Python builders, course registry, aggregation, API, and scripts are in backend/app and scripts. Data provenance is in data/manifests. See docs for course mapping, schema, source limitations, deployment, and demonstration.
+Use the Overview date-range controls to select dates within the loaded dataset, choose a sample location or Negros Oriental, and Apply Filters. The eight climate KPI cards, Chapter 08 visualizations, two relationship plots, and Chapter 09 Folium map use the selected weather rows. Each chart exposes its actual Python builder, deterministic interpretation, evidence, and reproduction package. API Sources fetches bounded Open-Meteo periods; Dataset Upload accepts compatible CSV, Parquet, or weather JSON in a private session.
 
-For offline PBF, GeoPackage, or GeoJSON processing, install `scripts/requirements-offline.txt` in a separate environment if needed. The public API does not require GeoPandas or PyOsmium. `scripts/prepare_osm.py --help` lists boundary and snapshot-date inputs; its output includes separate unassigned and ambiguous review files.
+The five-point snapshot is a presentation fallback. The API is limited to three points and 367 days per visitor request. The full 2010–2025 period is prepared separately with:
 
-`scripts/fetch_weather.py` prepares a selected historical ERA5 period in bounded calendar-year chunks. Its default period is 2010–2025; run it deliberately after reviewing provider terms and quotas. The checked-in presentation snapshot remains the smaller 2024–2025 subset.
+    .venv/bin/python scripts/fetch_weather.py --start 2010-01-01 --end 2025-12-31
 
-The app uses Matplotlib's Agg backend and a rendering lock. Plotly figures are generated in Python and delivered as figure JSON. Folium generates map HTML. Temporary uploads and results are process-local for three hours and disappear on restart.
+Review provider terms and quotas before a bulk fetch. Matplotlib uses the noninteractive Agg backend and a rendering lock. Plotly figures are generated in Python; Folium uses OpenStreetMap only for background tiles. Session uploads and results expire after three hours and disappear on restart.
+
+See docs for course mapping, data definitions, source coverage, deployment, and a demonstration walkthrough.

@@ -1,7 +1,7 @@
 """Build a small, real, explicitly partial presentation snapshot.
 
 Run from the repository root with: python scripts/build_snapshots.py
-One-time Overpass use is for preparing a reviewed snapshot, never a public app backend.
+This deliberately refreshes the five-point climate presentation snapshot.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 from app.catalog import LOCATIONS
-from app.processing import classify_osm_tags, prepare_facilities, prepare_weather
+from app.processing import prepare_weather
 
 DATA = ROOT / "data"
 USER_AGENT = "BayanVizPH/0.1 educational snapshot preparation"
@@ -26,7 +26,7 @@ USER_AGENT = "BayanVizPH/0.1 educational snapshot preparation"
 
 def write_manifest(kind: str, file: Path, source: str, period: str, coverage: str, history: list[str]) -> None:
     manifest = {
-        "schema_version": "1.0", "source": source, "license": "CC BY 4.0" if kind == "weather" else "ODbL 1.0 (© OpenStreetMap contributors)",
+        "schema_version": "1.0", "source": source, "license": "See current Open-Meteo terms and ERA5/ECMWF attribution",
         "retrieved_at_utc": datetime.now(timezone.utc).isoformat(), "observation_period": period,
         "geographic_coverage": coverage, "row_count": len(pd.read_csv(file)),
         "checksum_sha256": hashlib.sha256(file.read_bytes()).hexdigest(), "transformation_history": history,
@@ -57,34 +57,9 @@ async def weather(client: httpx.AsyncClient) -> None:
     print(f"weather: {len(pd.read_csv(output))} rows")
 
 
-async def facilities(client: httpx.AsyncClient) -> None:
-    parts = []
-    for key, loc in LOCATIONS.items():
-        lat, lon = loc["latitude"], loc["longitude"]
-        parts.append(f'node(around:6000,{lat},{lon})[amenity~"^(pharmacy|clinic|bank|atm|school)$"];way(around:6000,{lat},{lon})[amenity~"^(pharmacy|clinic|bank|atm|school)$"];node(around:6000,{lat},{lon})[shop~"^(chemist|supermarket|convenience|department_store|grocery)$"];way(around:6000,{lat},{lon})[shop~"^(chemist|supermarket|convenience|department_store|grocery)$"];')
-    query = "[out:json][timeout:80];(" + "".join(parts) + ");out center tags;"
-    response = await client.post("https://overpass-api.de/api/interpreter", data={"data": query}, timeout=120)
-    response.raise_for_status()
-    payload = response.json()
-    rows = []
-    for item in payload.get("elements", []):
-        tags = item.get("tags", {})
-        cat = classify_osm_tags(tags)
-        center = item.get("center", item)
-        lat, lon = center.get("lat"), center.get("lon")
-        if not cat or lat is None or lon is None: continue
-        nearest = min(LOCATIONS.values(), key=lambda loc: (loc["latitude"]-lat)**2 + (loc["longitude"]-lon)**2)
-        rows.append({"osm_type": item["type"], "osm_id": item["id"], "name": tags.get("name", "Unnamed mapped feature"), "category": cat, "latitude": lat, "longitude": lon, "province": nearest["province"], "region": nearest["region"], "snapshot_date": datetime.now(timezone.utc).date().isoformat(), "source_tags": json.dumps(tags, ensure_ascii=False), "assignment_method": "nearest registered center within query radius; not verified administrative membership"})
-    output = DATA / "samples" / "facilities_osm_sample.csv"
-    prepare_facilities(pd.DataFrame(rows)).to_csv(output, index=False)
-    write_manifest("facilities", output, "OpenStreetMap via one-time Overpass bounded sample query", datetime.now(timezone.utc).date().isoformat(), "6 km radius around five sample city centers; assignments approximate, not province-wide", ["Queried six selected categories", "Preserved source tags", "Deduplicated OSM type/ID", "Assigned nearest sample center; boundary membership unverified"])
-    print(f"facilities: {len(pd.read_csv(output))} rows")
-
-
 async def main() -> None:
     async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}) as client:
         await weather(client)
-        await facilities(client)
 
 
 if __name__ == "__main__":

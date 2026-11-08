@@ -6,7 +6,6 @@ import io
 import inspect
 import json
 import threading
-from datetime import datetime
 
 import folium
 import matplotlib
@@ -16,22 +15,20 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import seaborn as sns
-from folium.plugins import MarkerCluster
 from statsmodels.graphics.mosaicplot import mosaic
 
 from .catalog import LOCATIONS
-from .processing import monthly_rainfall
+from .processing import RAINY_DAY_MM, correlation_table, period_table
 
 RENDER_LOCK = threading.Lock()
-PALETTE = {"pharmacy":"#1e88a8", "clinic":"#2774b7", "bank":"#a55252", "atm":"#ca8342", "retail":"#7083b8", "school":"#679875"}
+PALETTE = {"rainy": "#1f7fa8", "dry": "#e2a548"}
 
 
 def build_bar(table: pd.DataFrame):
     fig, ax = plt.subplots(figsize=(9, 5))
-    sns.barplot(data=table, x="province", y="count", hue="category", palette=PALETTE, ax=ax, errorbar=None)
-    ax.set(xlabel="Sample area", ylabel="Mapped OSM facilities", title="Mapped facilities by area and category")
-    ax.tick_params(axis="x", rotation=20)
-    ax.legend(title="Category", bbox_to_anchor=(1.01, 1), loc="upper left")
+    sns.barplot(data=table, x="month", y="average_monthly_mm", hue="location_name", errorbar=None, ax=ax)
+    ax.set(xlabel="Month", ylabel="Average complete-month precipitation total (mm)", title="Monthly rainfall at sample locations")
+    ax.legend(title="Sample location", bbox_to_anchor=(1.01, 1), loc="upper left")
     fig.tight_layout()
     return fig
 
@@ -39,18 +36,13 @@ def build_bar(table: pd.DataFrame):
 def build_line(table: pd.DataFrame):
     fig, ax = plt.subplots(figsize=(9, 5))
     variable = str(table.variable.iloc[0])
-    unit = "mm" if variable == "precipitation_mm" else "°C"
-    measure = "daily precipitation" if variable == "precipitation_mm" else "daily " + variable.replace("temperature_", "").replace("_c", "") + " temperature"
-    monthly = "period_index" in table
-    x = "period_index" if monthly else "year"
-    sns.lineplot(data=table, x=x, y="measure_value", hue="location_name", marker="o", estimator=None, ax=ax)
-    ax.set(xlabel="Year / month" if monthly else "Year", ylabel=f"Period mean of {measure} ({unit})", title=f"{'Monthly' if monthly else 'Annual'} mean of {measure} at sample points")
-    if monthly:
-        periods = table[["period_index", "year", "month"]].drop_duplicates().sort_values("period_index").iloc[::3]
-        ax.set_xticks(periods.period_index, [f"{int(row.year)}-{int(row.month):02d}" for row in periods.itertuples()])
-        ax.tick_params(axis="x", rotation=35)
-    else:
-        ax.set_xticks(sorted(table.year.unique()))
+    unit = "mm" if variable == "precipitation_mm" else "km/h" if variable == "wind_speed_max_kmh" else "°C"
+    sns.lineplot(data=table, x="period_index", y="measure_value", hue="location_name", estimator=None, ax=ax)
+    ticks = table[["period_index", "period"]].drop_duplicates().sort_values("period_index")
+    stride = max(1, len(ticks) // 10)
+    ticks = ticks.iloc[::stride]
+    ax.set_xticks(ticks.period_index, ticks.period, rotation=35)
+    ax.set(xlabel="Observation period", ylabel=f"{variable.replace('_', ' ').title()} ({unit})", title="Historical climate trend at sample points")
     ax.legend(title="Sample location", bbox_to_anchor=(1.01, 1), loc="upper left")
     fig.tight_layout()
     return fig
@@ -59,10 +51,9 @@ def build_line(table: pd.DataFrame):
 def build_box(table: pd.DataFrame):
     fig, ax = plt.subplots(figsize=(9, 5))
     variable = str(table.variable.iloc[0])
-    unit = "mm" if variable == "precipitation_mm" else "°C"
-    measure = "precipitation" if variable == "precipitation_mm" else variable.replace("temperature_", "").replace("_c", "") + " temperature"
+    unit = "mm" if variable == "precipitation_mm" else "km/h" if variable == "wind_speed_max_kmh" else "°C"
     sns.boxplot(data=table, x="location_name", y="measure_value", color="#5d9fba", ax=ax)
-    ax.set(xlabel="Sample location", ylabel=f"Daily {measure} ({unit})", title=f"Daily {measure} distributions")
+    ax.set(xlabel="Sample location", ylabel=f"Daily {variable.replace('_', ' ')} ({unit})", title="Daily climate distribution")
     ax.tick_params(axis="x", rotation=20)
     fig.tight_layout()
     return fig
@@ -70,8 +61,17 @@ def build_box(table: pd.DataFrame):
 
 def build_bubble(table: pd.DataFrame):
     fig, ax = plt.subplots(figsize=(9, 5))
-    sns.scatterplot(data=table, x="precipitation_mm", y="temperature_mean_c", size="facility_count", sizes=(70, 800), hue="location_name", alpha=0.68, ax=ax)
-    ax.set(xlabel="Annual precipitation at sample point (mm)", ylabel="Mean daily temperature (°C)", title="Weather and mapped facility counts")
+    sns.scatterplot(data=table, x="precipitation_mm", y="temperature_mean_c", size="wind_speed_max_kmh", sizes=(35, 340), hue="location_name", alpha=0.68, ax=ax)
+    ax.set(xlabel="Daily precipitation (mm)" if table.aggregation.iloc[0] == "daily" else "Complete-month precipitation total (mm)", ylabel="Mean temperature (°C)", title="Temperature and rainfall · bubble area = maximum wind speed")
+    ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+def build_rain_wind(table: pd.DataFrame):
+    fig, ax = plt.subplots(figsize=(9, 5))
+    sns.scatterplot(data=table, x="precipitation_mm", y="wind_speed_max_kmh", hue="location_name", alpha=0.58, ax=ax)
+    ax.set(xlabel="Daily precipitation (mm)" if table.aggregation.iloc[0] == "daily" else "Complete-month precipitation total (mm)", ylabel="Maximum wind speed (km/h)", title="Rainfall and wind speed at paired periods")
     ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", fontsize=8)
     fig.tight_layout()
     return fig
@@ -80,130 +80,168 @@ def build_bubble(table: pd.DataFrame):
 def build_heatmap(table: pd.DataFrame):
     grid = table.pivot_table(index="location_name", columns="month", values="average_monthly_mm", aggfunc="first")
     fig, ax = plt.subplots(figsize=(9, 4.8))
-    sns.heatmap(grid, cmap="YlGnBu", annot=True, fmt=".0f", linewidths=0.4, cbar_kws={"label":"Average complete-month total (mm)"}, ax=ax)
-    ax.set(xlabel="Month", ylabel="Sample location", title="Climatological monthly precipitation")
+    sns.heatmap(grid, cmap="YlGnBu", annot=True, fmt=".0f", linewidths=0.4, cbar_kws={"label": "Average complete-month total (mm)"}, ax=ax)
+    ax.set(xlabel="Month", ylabel="Sample location", title="Seasonal rainfall patterns")
     fig.tight_layout()
     return fig
 
 
 def build_mosaic(table: pd.DataFrame):
-    counts = {(str(row["province"]), str(row["category"])): int(row["count"]) for row in table.to_dict("records")}
+    counts = {(str(row["location_name"]), str(row["condition"])): int(row["count"]) for row in table.to_dict("records")}
     fig, ax = plt.subplots(figsize=(10, 5))
     mosaic(counts, ax=ax, labelizer=lambda key: key[-1] if counts[key] >= 2 else "", properties=lambda key: {"color": PALETTE.get(key[-1], "#7294aa"), "alpha": 0.85})
-    ax.set_title("Facility category composition by sample area")
+    ax.set_title("Rainy and dry observed days by sample location")
     fig.tight_layout()
     return fig
 
 
 def build_treemap(table: pd.DataFrame):
-    fig = px.treemap(table, path=["region", "province", "category"], values="count", color="count", color_continuous_scale="Blues", title="Mapped facilities by region, area, and category")
-    fig.update_layout(margin=dict(t=55, l=12, r=12, b=12), coloraxis_colorbar_title="Facilities")
+    fig = px.treemap(table, path=["region", "location_name", "month"], values="rainy_days", color="rainy_days", color_continuous_scale="Blues", title="Rainy-day observations by region, sample location, and month")
+    fig.update_layout(margin=dict(t=55, l=12, r=12, b=12), coloraxis_colorbar_title="Rainy days")
     return fig
 
 
 def build_map(table: pd.DataFrame):
     center = [float(table.latitude.mean()), float(table.longitude.mean())]
-    map_obj = folium.Map(location=center, zoom_start=8, tiles="OpenStreetMap", control_scale=True)
-    weather_layer = folium.FeatureGroup(name="Weather sample points", show=True)
-    facility_layer = folium.FeatureGroup(name="OSM facilities", show=True)
-    cluster = MarkerCluster().add_to(facility_layer)
+    map_obj = folium.Map(location=center, zoom_start=7, tiles="OpenStreetMap", control_scale=True)
+    point_layer = folium.FeatureGroup(name="Weather sample locations", show=True)
+    rain_layer = folium.FeatureGroup(name="Mean daily rainfall circles", show=True)
     for row in table.itertuples():
         lat, lon = float(row.latitude), float(row.longitude)
-        label = html.escape(str(row.name))
-        if row.kind == "weather":
-            value = float(row.value_c)
-            radius = float(np.clip(4 + 0.5 * (value - 15), 5, 12))
-            popup = f"<b>{label}</b><br>ERA5 sample location · {html.escape(str(row.province))}<br>Mean daily temperature: {value:.1f} °C ({int(row.valid_days)} valid days)"
-            folium.Marker([lat, lon], popup=folium.Popup(popup, max_width=260), tooltip=label, icon=folium.Icon(color="blue", icon="cloud")).add_to(weather_layer)
-            folium.CircleMarker([lat, lon], radius=radius, color="#0d6b9a", fill=True, fill_opacity=0.5, popup=folium.Popup(popup, max_width=260)).add_to(weather_layer)
-        else:
-            category = html.escape(str(row.category))
-            popup = f"<b>{label}</b><br>{category} · {html.escape(str(row.province))}<br>© OpenStreetMap contributors"
-            folium.Marker([lat, lon], popup=folium.Popup(popup, max_width=260), tooltip=category, icon=folium.Icon(color="green", icon="info-sign")).add_to(cluster)
-    weather_layer.add_to(map_obj)
-    facility_layer.add_to(map_obj)
+        label = html.escape(str(row.location_name))
+        temp = float(row.temperature_value_c)
+        rainfall = float(row.average_daily_rain_mm)
+        radius = float(np.clip(5 + 2.5 * np.sqrt(max(rainfall, 0)), 5, 22))
+        color = "red" if temp >= 28 else "orange" if temp >= 26 else "blue"
+        selected_value = f"{float(row.selected_measure_value):.1f} {html.escape(str(row.selected_measure_unit))}" if pd.notna(row.selected_measure_value) else "unavailable"
+        popup = f"<b>{label}</b><br>{html.escape(str(row.province))} · ERA5 sample point<br>Selected {html.escape(str(row.selected_variable))}: {selected_value}<br>Temperature used for marker color: {temp:.1f} °C ({int(row.temperature_valid_days)} valid days)<br>Average daily rain used for circle size: {rainfall:.1f} mm ({int(row.rain_valid_days)} valid days)"
+        folium.Marker([lat, lon], popup=folium.Popup(popup, max_width=300), tooltip=label, icon=folium.Icon(color=color, icon="cloud")).add_to(point_layer)
+        folium.CircleMarker([lat, lon], radius=radius, color="#0d6b9a", fill=True, fill_opacity=0.4, popup=folium.Popup(popup, max_width=300)).add_to(rain_layer)
+    point_layer.add_to(map_obj)
+    rain_layer.add_to(map_obj)
     folium.LayerControl(collapsed=False).add_to(map_obj)
-    map_obj.fit_bounds([[float(table.latitude.min()), float(table.longitude.min())], [float(table.latitude.max()), float(table.longitude.max())]])
-    legend = '<div style="position:fixed;bottom:22px;left:18px;z-index:9999;background:white;padding:10px 13px;border:1px solid #b7cbd8;border-radius:7px;font:12px sans-serif;color:#163a51;box-shadow:0 2px 8px #0002"><b>Map symbols</b><br>Blue: ERA5 sample point<br>Green: mapped OSM feature<br>Blue circle radius 5–12 px: mean daily temperature (°C)</div>'
+    if len(table) > 1:
+        map_obj.fit_bounds([[float(table.latitude.min()), float(table.longitude.min())], [float(table.latitude.max()), float(table.longitude.max())]])
+    else:
+        map_obj.location = center
+        map_obj.options["zoom"] = 10
+    color_measure = str(table.selected_variable.iloc[0]) if str(table.selected_variable.iloc[0]).startswith("temperature_") else "temperature_mean_c"
+    legend = f'<div style="position:fixed;bottom:22px;left:18px;z-index:9999;background:white;padding:10px 13px;border:1px solid #b7cbd8;border-radius:7px;font:12px sans-serif;color:#163a51;box-shadow:0 2px 8px #0002"><b>Climate symbols</b><br>Marker: {html.escape(color_measure)} (&lt;26 blue, 26–&lt;28 orange, ≥28 red)<br>Circle radius: 5 + 2.5√(mean daily rainfall in mm), capped 5–22 px<br>ERA5 sample points; OSM is the background map only.</div>'
     map_obj.get_root().html.add_child(folium.Element(legend))
     return map_obj.get_root().render()
 
 
 REGISTRY = {
-    "bar": ("Chapter 08", "Seaborn bar graph", "sns.barplot()", "Compare mapped facility categories", build_bar, "facilities"),
-    "line": ("Chapter 08", "Seaborn line graph", "sns.lineplot()", "Compare annual sampled temperatures", build_line, "weather"),
-    "box": ("Chapter 08", "Seaborn box plot", "sns.boxplot()", "Inspect daily temperature distributions", build_box, "weather"),
-    "bubble": ("Chapter 08", "Bubble chart", "sns.scatterplot()", "Compare two weather variables and facility counts", build_bubble, "both"),
-    "heatmap": ("Chapter 08", "Heatmap", "pivot_table(); sns.heatmap()", "Inspect monthly rainfall seasonality", build_heatmap, "weather"),
-    "mosaic": ("Chapter 08", "Mosaic plot", "mosaic()", "Compare categorical facility composition", build_mosaic, "facilities"),
-    "treemap": ("Chapter 08", "Treemap", "px.treemap()", "Explore additive facility counts in a hierarchy", build_treemap, "facilities"),
-    "map": ("Chapter 09", "Markers and map symbols", "folium.Marker(); folium.CircleMarker()", "Locate samples and mapped facilities", build_map, "both"),
+    "bar": ("Chapter 08", "Seaborn bar graph", "sns.barplot()", "Compare mean monthly precipitation totals at sample locations", build_bar, "weather"),
+    "line": ("Chapter 08", "Seaborn line graph", "sns.lineplot()", "Inspect daily, monthly, or annual climate trends", build_line, "weather"),
+    "box": ("Chapter 08", "Seaborn box plot", "sns.boxplot()", "Compare daily climate distributions", build_box, "weather"),
+    "bubble": ("Chapter 08", "Bubble chart", "sns.scatterplot()", "Explore paired temperature and rainfall; bubble area is wind speed", build_bubble, "weather"),
+    "rain_wind": ("Chapter 08", "Rainfall–wind relationship", "sns.scatterplot()", "Explore paired rainfall and maximum wind speed", build_rain_wind, "weather"),
+    "heatmap": ("Chapter 08", "Heatmap", "pivot_table(); sns.heatmap()", "Compare seasonal precipitation patterns", build_heatmap, "weather"),
+    "mosaic": ("Chapter 08", "Mosaic plot", "mosaic()", "Compare rainy and dry day frequencies", build_mosaic, "weather"),
+    "treemap": ("Chapter 08", "Treemap", "px.treemap()", "Explore additive rainy-day observation counts", build_treemap, "weather"),
+    "map": ("Chapter 09", "Markers and map symbols", "folium.Map(); folium.Marker(); folium.CircleMarker()", "Map sampled climate statistics", build_map, "weather"),
 }
 
 
-def prepare_chart(chart_id: str, weather: pd.DataFrame, facilities: pd.DataFrame, variable: str = "temperature_mean_c", aggregation: str = "annual") -> tuple[pd.DataFrame, str, list[str]]:
-    """Create the exact chart input table from normalized data."""
+def prepare_chart(chart_id: str, weather: pd.DataFrame, variable: str = "temperature_mean_c", aggregation: str = "annual", relationship_aggregation: str = "daily") -> tuple[pd.DataFrame, str, list[str], dict]:
+    """Construct the chart input from the already filtered daily observations."""
     if chart_id not in REGISTRY:
         raise ValueError("Unknown chart")
-    if variable not in {"temperature_mean_c", "temperature_min_c", "temperature_max_c", "precipitation_mm"}:
+    if weather.empty:
+        raise ValueError("No observations for the selected dates and locations")
+    if variable not in {"temperature_mean_c", "temperature_min_c", "temperature_max_c", "precipitation_mm", "wind_speed_max_kmh"}:
         raise ValueError("Choose a supported weather measure")
-    if aggregation not in {"annual", "monthly"}:
-        raise ValueError("Choose annual or monthly line grouping")
-    needs = REGISTRY[chart_id][5]
-    if needs in ("weather", "both") and weather.empty:
-        raise ValueError("Weather data unavailable for this chart")
-    if needs in ("facilities", "both") and facilities.empty and chart_id != "map":
-        raise ValueError("Mapped facility data unavailable for this chart")
-    if chart_id in ("bar", "mosaic", "treemap"):
-        fields = ["region", "province", "category"] if chart_id == "treemap" else ["province", "category"]
-        table = facilities.groupby(fields, as_index=False).size().rename(columns={"size": "count"})
-        return table, "facilities", ["Current OSM mapping is incomplete; counts are mapped features, not all facilities.", "Snapshot areas were assigned by nearest sample center, not verified administrative boundaries."]
+    if aggregation not in {"daily", "monthly", "annual"}:
+        raise ValueError("Choose daily, monthly, or annual grouping")
+    if relationship_aggregation not in {"daily", "monthly"}:
+        raise ValueError("Choose daily or monthly relationship grouping")
+    location_name = lambda key: LOCATIONS.get(key, {}).get("name", key)
+    region_name = lambda key: LOCATIONS.get(key, {}).get("region", "Uploaded location")
+    caveats = ["ERA5 values are modeled estimates at representative coordinates, not province-wide station observations.", "Partial periods and missing values are never filled with invented observations."]
+    facts = {}
+    if chart_id in {"bar", "heatmap", "treemap"}:
+        monthly = period_table(weather, "monthly")
+        monthly = monthly[monthly.complete_rainfall & monthly.precipitation_mm.notna()].copy()
+        if monthly.empty:
+            raise ValueError("No months meet the 90% valid-rainfall threshold in this selection")
+        if chart_id == "treemap":
+            monthly["region"] = monthly.location_id.map(region_name)
+            monthly["location_name"] = monthly.location_id.map(location_name)
+            table = monthly.groupby(["region", "location_name", "month"], as_index=False).agg(rainy_days=("rainy_days", "sum"), valid_days=("precipitation_valid_days", "sum"))
+            table = table[table.rainy_days.gt(0)].copy()
+            table["month"] = table.month.astype(str).str.zfill(2)
+            return table, "rainy days", caveats + ["Rainy means daily precipitation ≥1 mm. Counts are additive observations, not rainfall depths."], facts
+        table = monthly.groupby(["location_id", "month"], as_index=False).agg(average_monthly_mm=("precipitation_mm", "mean"), valid_months=("precipitation_mm", "count"))
+        table["location_name"] = table.location_id.map(location_name)
+        return table, "mm", caveats + ["Only months with at least 90% valid daily rainfall values contribute to the monthly comparison."], facts
     if chart_id == "line":
-        df = weather.dropna(subset=[variable]).copy()
-        df["year"] = df.date.dt.year
-        keys = ["location_id", "year"]
-        if aggregation == "monthly":
-            df["month"] = df.date.dt.month
-            keys.append("month")
-        table = df.groupby(keys, as_index=False).agg(measure_value=(variable, "mean"), valid_days=(variable, "count"))
-        if aggregation == "monthly":
-            table["period_index"] = table.year + (table.month - 1) / 12
+        if aggregation == "daily":
+            table = weather.dropna(subset=[variable])[["location_id", "date", variable]].copy().rename(columns={variable: "measure_value"})
+            table["period"] = table.date.dt.strftime("%Y-%m-%d")
+            table["valid_days"] = 1
+            table["expected_days"] = 1
+        else:
+            periods = period_table(weather, aggregation)
+            measure = variable
+            table = periods[["location_id", "period", "expected_days", measure, "temperature_valid_days", "precipitation_valid_days", "wind_valid_days"]].copy()
+            table = table.rename(columns={measure: "measure_value"})
+            count_col = "precipitation_valid_days" if variable == "precipitation_mm" else "wind_valid_days" if variable == "wind_speed_max_kmh" else "temperature_valid_days"
+            table["valid_days"] = table[count_col]
+            table = table.drop(columns=["temperature_valid_days", "precipitation_valid_days", "wind_valid_days"])
+            if variable == "precipitation_mm":
+                table = table[table.valid_days.ge(np.ceil(table.expected_days * 0.9))]
+        table = table.dropna(subset=["measure_value"]).sort_values(["location_id", "period"])
+        if table.empty:
+            raise ValueError("No valid values for this variable and period")
+        positions = {period: i for i, period in enumerate(sorted(table.period.unique()))}
+        table["period_index"] = table.period.map(positions)
+        table["location_name"] = table.location_id.map(location_name)
         table["variable"] = variable
-        table["location_name"] = table.location_id.map(lambda key: LOCATIONS.get(key, {}).get("name", key))
-        return table, "mm" if variable == "precipitation_mm" else "°C", ["Each plotted point is the mean of valid daily ERA5 estimates at a sample location for its shown period; incomplete periods are not annualized."]
+        return table, "mm" if variable == "precipitation_mm" else "km/h" if variable == "wind_speed_max_kmh" else "°C", caveats + ["Rainfall totals require at least 90% valid days per full calendar period; valid-day counts and expected days appear in evidence."], facts
     if chart_id == "box":
         table = weather.dropna(subset=[variable])[["location_id", "date", variable]].copy().rename(columns={variable: "measure_value"})
         table["variable"] = variable
-        table["location_name"] = table.location_id.map(lambda key: LOCATIONS.get(key, {}).get("name", key))
-        return table, "mm" if variable == "precipitation_mm" else "°C", ["Daily values are ERA5 estimates at sample points, not province-wide station measurements."]
-    if chart_id == "heatmap":
-        months = monthly_rainfall(weather)
-        complete = months[months.complete & months.total_mm.notna()]
-        table = complete.groupby(["location_id", "month"], as_index=False).agg(average_monthly_mm=("total_mm", "mean"), valid_months=("total_mm", "count"))
-        table["location_name"] = table.location_id.map(lambda key: LOCATIONS.get(key, {}).get("name", key))
-        return table, "mm", ["Only months with all expected daily precipitation values contribute; incomplete months are excluded."]
-    if chart_id == "bubble":
-        df = weather.copy()
-        df["year"] = df.date.dt.year
-        annual = df.groupby(["location_id", "year"], as_index=False).agg(precipitation_mm=("precipitation_mm", lambda s: s.sum(min_count=1)), temperature_mean_c=("temperature_mean_c", "mean"), valid_days=("precipitation_mm", "count"))
-        annual["expected_days"] = annual.year.map(lambda y: 366 if pd.Timestamp(int(y), 12, 31).is_leap_year else 365)
-        annual = annual[annual.valid_days == annual.expected_days].dropna(subset=["precipitation_mm", "temperature_mean_c"])
-        counts = facilities.groupby("province").size()
-        annual["province"] = annual.location_id.map(lambda key: LOCATIONS.get(key, {}).get("province", ""))
-        annual["location_name"] = annual.location_id.map(lambda key: LOCATIONS.get(key, {}).get("name", key))
-        annual["facility_count"] = annual.province.map(counts).fillna(0).astype(int)
-        return annual, "mm / °C / mapped count", ["Bubble area is the current mapped facility count, not population or risk.", "Facility area labels were assigned by nearest sample center; boundaries were not checked.", "Historical ERA5 weather and current OSM features have different reference dates; the display implies no causation."]
+        table["location_name"] = table.location_id.map(location_name)
+        return table, "mm" if variable == "precipitation_mm" else "km/h" if variable == "wind_speed_max_kmh" else "°C", caveats + ["Extreme values remain in the distribution; inspect flagged outliers before interpretation."], facts
+    if chart_id in {"bubble", "rain_wind"}:
+        x, y = ("precipitation_mm", "temperature_mean_c") if chart_id == "bubble" else ("precipitation_mm", "wind_speed_max_kmh")
+        paired, correlation = correlation_table(weather, x, y, relationship_aggregation)
+        if chart_id == "bubble":
+            if relationship_aggregation == "daily":
+                wind = weather[["location_id", "date", "wind_speed_max_kmh"]].copy()
+                paired = paired.merge(wind, on=["location_id", "date"], how="inner")
+            else:
+                wind = period_table(weather, "monthly")[["location_id", "period", "wind_speed_max_kmh"]]
+                paired = paired.merge(wind, on=["location_id", "period"], how="inner")
+            paired = paired.dropna(subset=["wind_speed_max_kmh"])
+            if len(paired) >= 3 and paired[x].nunique() > 1 and paired[y].nunique() > 1:
+                correlation = float(paired[x].corr(paired[y]))
+            else:
+                correlation = None
+        if paired.empty:
+            raise ValueError("No paired observations with the selected variables")
+        paired["location_name"] = paired.location_id.map(location_name)
+        paired["aggregation"] = relationship_aggregation
+        paired["pearson_r"] = correlation
+        facts = {"pearson_r": correlation, "paired_observations": len(paired)}
+        return paired, "mm / °C / km/h" if chart_id == "bubble" else "mm / km/h", caveats + ["Pearson correlation describes association in matched location-period observations, not causation.", "Monthly relationships include only periods with at least 90% valid temperature and rainfall days."], facts
+    if chart_id == "mosaic":
+        observed = weather.dropna(subset=["precipitation_mm"]).copy()
+        observed["condition"] = np.where(observed.precipitation_mm.ge(RAINY_DAY_MM), "rainy", "dry")
+        table = observed.groupby(["location_id", "condition"], as_index=False).size().rename(columns={"size": "count"})
+        table["location_name"] = table.location_id.map(location_name)
+        return table, "observed days", caveats + ["Rainy means daily precipitation ≥1 mm; missing rainfall days are excluded from both categories."], facts
     rows = []
-    for key in weather.location_id.unique():
-        if key in LOCATIONS:
-            loc = LOCATIONS[key]
-            valid = weather[(weather.location_id == key) & weather.temperature_mean_c.notna()]
-            if valid.empty:
-                continue
-            rows.append({"kind":"weather", "name":loc["name"], "category":"weather sample", "province":loc["province"], "latitude":loc["latitude"], "longitude":loc["longitude"], "value_c":valid.temperature_mean_c.mean(), "valid_days":len(valid)})
-    for row in facilities.head(120).itertuples():
-        rows.append({"kind":"facility", "name":getattr(row, "name", "") or str(row.category), "category":row.category, "province":row.province, "latitude":row.latitude, "longitude":row.longitude, "value_c":np.nan, "valid_days":np.nan})
-    return pd.DataFrame(rows), "locations / °C", [f"Map displays at most 120 of {len(facilities)} loaded facilities; counts elsewhere use all loaded records.", "Weather circles use radius = clamp(4 + 0.5 × (mean daily °C − 15), 5, 12) pixels; they do not represent risk.", "Weather points are representative locations; facility coverage and nearest-center area assignments are partial."]
+    for key, group in weather.groupby("location_id"):
+        loc = LOCATIONS.get(key)
+        if not loc or group.temperature_mean_c.count() == 0 or group.precipitation_mm.count() == 0:
+            continue
+        selected_measure = group[variable].sum(min_count=1) if variable == "precipitation_mm" else group[variable].max() if variable == "wind_speed_max_kmh" else group[variable].mean()
+        color_temp = group[variable].mean() if variable.startswith("temperature_") and group[variable].count() else group.temperature_mean_c.mean()
+        rows.append({"location_id": key, "location_name": loc["name"], "province": loc["province"], "region": loc["region"], "latitude": loc["latitude"], "longitude": loc["longitude"], "temperature_value_c": color_temp, "temperature_mean_c": group.temperature_mean_c.mean(), "temperature_valid_days": int(group[variable].count()) if variable.startswith("temperature_") else int(group.temperature_mean_c.count()), "average_daily_rain_mm": group.precipitation_mm.mean(), "rain_valid_days": int(group.precipitation_mm.count()), "selected_variable": variable, "selected_measure_value": selected_measure, "selected_measure_unit": "mm" if variable == "precipitation_mm" else "km/h" if variable == "wind_speed_max_kmh" else "°C"})
+    table = pd.DataFrame(rows)
+    return table, "°C / mm per valid day", caveats + ["Map circles use average daily rainfall over valid days, not a risk measure. Selected precipitation totals sum valid days only. OSM provides map tiles only.", "Uploaded locations without validated registry coordinates are omitted from the map."], facts
 
 
 def render_chart(chart_id: str, table: pd.DataFrame) -> dict:
@@ -220,44 +258,39 @@ def render_chart(chart_id: str, table: pd.DataFrame) -> dict:
     return {"type": "png", "content": base64.b64encode(buffer.getvalue()).decode("ascii")}
 
 
-def interpretation(chart_id: str, table: pd.DataFrame, caveats: list[str]) -> dict:
+def interpretation(chart_id: str, table: pd.DataFrame, caveats: list[str], facts: dict) -> dict:
     count = len(table)
-    if chart_id in ("bar", "mosaic", "treemap") and count:
-        leader = table.sort_values("count", ascending=False).iloc[0]
-        finding = f"The largest shown group is {leader['category']} in {leader['province']}: {int(leader['count'])} mapped features."
-    elif chart_id == "heatmap" and count:
+    if chart_id in {"bubble", "rain_wind"}:
+        r = facts["pearson_r"]
+        if r is None:
+            finding = f"Pearson correlation is unavailable for {count} paired observations because the sample is too small or a variable is constant."
+        else:
+            strength = "weak" if abs(r) < 0.3 else "moderate" if abs(r) < 0.7 else "strong"
+            finding = f"Pearson r = {r:.3f} across {count} matched observations: a {strength} {'positive' if r > 0 else 'negative'} association."
+    elif chart_id in {"bar", "heatmap"}:
         leader = table.sort_values("average_monthly_mm", ascending=False).iloc[0]
-        finding = f"The largest complete-month average shown is {leader['average_monthly_mm']:.1f} mm at {leader['location_name']} in month {int(leader['month'])}."
-    elif chart_id == "line" and count:
+        finding = f"The highest shown complete-month mean is {leader.average_monthly_mm:.1f} mm at {leader.location_name} in month {int(leader.month)} ({int(leader.valid_months)} valid months)."
+    elif chart_id == "line":
         leader = table.sort_values("measure_value", ascending=False).iloc[0]
-        period = f"{int(leader['year'])}-{int(leader['month']):02d}" if "month" in table else str(int(leader['year']))
-        unit = "mm" if leader["variable"] == "precipitation_mm" else "°C"
-        finding = f"The highest sampled period mean shown is {leader['measure_value']:.1f} {unit} at {leader['location_name']} in {period}, based on {int(leader['valid_days'])} valid days."
-    elif chart_id == "box" and count:
-        median = table.measure_value.median()
-        unit = "mm" if table.variable.iloc[0] == "precipitation_mm" else "°C"
-        finding = f"Across {count} valid daily samples, the median plotted value is {median:.1f} {unit}; the observed range is {table.measure_value.min():.1f}–{table.measure_value.max():.1f} {unit}."
-    elif chart_id == "bubble" and count:
-        leader = table.sort_values("precipitation_mm", ascending=False).iloc[0]
-        finding = f"The largest complete-year precipitation total shown is {leader['precipitation_mm']:.1f} mm at {leader['location_name']} in {int(leader['year'])}; its bubble represents {int(leader['facility_count'])} currently mapped facilities."
+        unit = "mm" if leader.variable == "precipitation_mm" else "km/h" if leader.variable == "wind_speed_max_kmh" else "°C"
+        finding = f"The highest shown period value is {leader.measure_value:.1f} {unit} at {leader.location_name} in {leader.period}, with {int(leader.valid_days)} of {int(leader.expected_days)} expected days."
+    elif chart_id == "box":
+        unit = "mm" if table.variable.iloc[0] == "precipitation_mm" else "km/h" if table.variable.iloc[0] == "wind_speed_max_kmh" else "°C"
+        finding = f"The median of {count} valid daily values is {table.measure_value.median():.1f} {unit}; standard deviation is {table.measure_value.std():.1f} {unit}."
+    elif chart_id == "treemap":
+        leader = table.sort_values("rainy_days", ascending=False).iloc[0]
+        finding = f"The largest shown group is {leader.location_name}, month {leader.month}: {int(leader.rainy_days)} rainy-day observations."
+    elif chart_id == "mosaic":
+        rainy = int(table.loc[table.condition.eq("rainy"), "count"].sum())
+        total = int(table["count"].sum())
+        finding = f"{rainy} of {total} valid precipitation days ({100 * rainy / total:.1f}%) met the 1 mm rainy-day threshold."
     else:
-        finding = f"The map displays {count} locations or features in this selection."
-    return {
-        "label": "Statistical Interpretation",
-        "shows": REGISTRY[chart_id][3],
-        "findings": finding,
-        "evidence": f"The evidence table contains {count} chart-input rows; the first 30 are shown here and the full table is downloadable.",
-        "relevance": "Use this comparison to form questions for local planning or further field verification.",
-        "limitations": caveats,
-    }
+        leader = table.sort_values("average_daily_rain_mm", ascending=False).iloc[0]
+        finding = f"The highest mapped mean daily rainfall is {leader.average_daily_rain_mm:.1f} mm at {leader.location_name}, from {int(leader.rain_valid_days)} valid days."
+    return {"label": "Statistical Interpretation", "shows": REGISTRY[chart_id][3], "findings": finding, "evidence": f"The evidence table has {count} chart-input rows; the first 30 appear here and the full table is downloadable.", "relevance": "Compare sample locations and periods for further climate research; association does not establish a cause.", "limitations": caveats}
 
 
 def code_for(chart_id: str) -> dict:
     entry = REGISTRY[chart_id]
-    highlights = {
-        "bar": ["sns.barplot", "groupby"], "line": ["sns.lineplot", "groupby"],
-        "box": ["sns.boxplot"], "bubble": ["sns.scatterplot", "groupby"],
-        "heatmap": ["pivot_table", "sns.heatmap"], "mosaic": ["mosaic(", "groupby"],
-        "treemap": ["px.treemap", "groupby"], "map": ["folium.Marker", "folium.CircleMarker"],
-    }
+    highlights = {"bar": ["sns.barplot"], "line": ["sns.lineplot"], "box": ["sns.boxplot"], "bubble": ["sns.scatterplot"], "rain_wind": ["sns.scatterplot"], "heatmap": ["pivot_table", "sns.heatmap"], "mosaic": ["mosaic("], "treemap": ["px.treemap"], "map": ["folium.Map", "folium.Marker", "folium.CircleMarker"]}
     return {"visualization": inspect.getsource(entry[4]), "preparation": inspect.getsource(prepare_chart), "topic": {"chapter": entry[0], "topic": entry[1], "library_function": entry[2], "objective": entry[3]}, "highlights": highlights[chart_id]}
