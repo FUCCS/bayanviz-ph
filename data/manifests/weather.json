@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "source": "Open-Meteo Historical Weather API, ERA5",
+  "license": "CC BY 4.0",
+  "retrieved_at_utc": "2026-11-08T13:12:54.408970+00:00",
+  "observation_period": "2024-01-01 to 2025-12-31",
+  "geographic_coverage": "Five representative Visayas city sample points; not provincial averages",
+  "row_count": 3655,
+  "checksum_sha256": "f4d434584f3eb20c2cfc623e98c3c2386c6fdf3995b914d7bde686adb080dea8",
+  "transformation_history": [
+    "Fetched daily ERA5 estimates",
+    "Normalized units to \u00b0C, mm, km/h",
+    "Deduplicated location/date/model"
+  ],
+  "status": "Prepared Real Dataset",
+  "coverage_status": "Partial coverage"
+}

@@ -1,0 +1,1 @@
+declare module 'plotly.js-dist-min' { const Plotly: {newPlot:(node:HTMLElement,data:unknown[],layout:unknown,config:unknown)=>Promise<unknown>; purge:(node:HTMLElement)=>void}; export default Plotly }

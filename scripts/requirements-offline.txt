@@ -1,0 +1,4 @@
+-r ../backend/requirements.txt
+geopandas==1.1.1
+shapely==2.1.2
+osmium==4.3.2
