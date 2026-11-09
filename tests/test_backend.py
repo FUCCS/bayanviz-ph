@@ -235,5 +235,6 @@ def test_prepared_snapshot_is_real_and_climate_only():
     assert len(weather) > 3000
     assert set(weather.columns) == {"location_id","date","model","temperature_mean_c","temperature_min_c","temperature_max_c","precipitation_mm","wind_speed_max_kmh"}
     catalog = client.get("/api/catalog").json()
-    assert all(chart["needs"] == "weather" for chart in catalog["charts"])
+    assert all(chart["needs"] == "weather" for chart in catalog["charts"] if chart["chapter"] in {"Chapter 08", "Chapter 09"})
+    assert any(chart["needs"] == "merged" for chart in catalog["charts"])
     assert "facilities" not in client.get("/api/sources").text.lower()

@@ -20,7 +20,8 @@ from pydantic import BaseModel, Field
 
 from .catalog import LOCATIONS, manifest, weather_frame
 from .charts import PALETTE, REGISTRY as CHARTS, code_for, interpretation, prepare_chart, render_chart
-from .connectors import fetch_weather
+from .connectors import fetch_nasa, fetch_weather
+from .multisource import MS_BUILDERS, MS_CHARTS, merge_sources, multisource_code, multisource_interpretation, normalize_nasa, prepare_multisource_chart, render_multisource_chart, validate_sources
 from .processing import MIN_PERIOD_COVERAGE, RAINY_DAY_MM, WEATHER_COLUMNS, climate_summary, date_bounds, filter_hash, filter_weather, period_table, prepare_weather, safe_number
 
 app = FastAPI(title="BayanViz PH API", version="0.1.0")
@@ -85,6 +86,20 @@ class ScopeRequest(BaseModel):
     end_date: date | None = None
 
 
+class MultiValidateRequest(BaseModel):
+    locations: list[str] = Field(min_length=1, max_length=3)
+    start_date: date
+    end_date: date
+    weather_variables: list[str] = Field(default_factory=lambda: WEATHER_COLUMNS.copy())
+    nasa_variables: list[str] = Field(default_factory=lambda: ["solar_radiation", "nasa_temperature_mean_c"])
+    include_nasa: bool = True
+    method: str = "merge"
+
+
+class MultiMergeRequest(BaseModel):
+    validation_id: str
+
+
 @app.get("/api/health")
 def health():
     return {"ok": True, "service": "BayanViz PH"}
@@ -94,7 +109,7 @@ def health():
 def start_session():
     prune()
     token = secrets.token_urlsafe(32)
-    sessions[token] = {"expires": time.time() + SESSION_TTL, "uploads": {}, "weather": None, "weather_source": None, "retrieved_at": None, "requests": []}
+    sessions[token] = {"expires": time.time() + SESSION_TTL, "uploads": {}, "weather": None, "weather_source": None, "retrieved_at": None, "requests": [], "multisource": None, "merged": None}
     return {"session_id": token, "expires_in_seconds": SESSION_TTL}
 
 
@@ -113,7 +128,7 @@ def catalog():
     return {
         "name": "BayanViz PH", "subtitle": "Philippine Historical Climate Data Analytics",
         "locations": list(LOCATIONS.values()),
-        "charts": [{"id": key, "chapter": row[0], "topic": row[1], "function": row[2], "objective": row[3], "needs": row[5]} for key, row in CHARTS.items()],
+        "charts": [{"id": key, "chapter": row[0], "topic": row[1], "function": row[2], "objective": row[3], "needs": row[5]} for key, row in CHARTS.items()] + [{"id": key, "chapter": "Climate integration", "topic": row[0], "function": row[1], "objective": row[2], "needs": "merged"} for key, row in MS_CHARTS.items()],
         "variables": WEATHER_COLUMNS,
         "upload_limit_mb": MAX_UPLOAD_MB, "upload_limit_rows": MAX_UPLOAD_ROWS,
         "upload_limit_columns": MAX_UPLOAD_COLUMNS, "uploads_per_session": MAX_UPLOADS_PER_SESSION,
@@ -132,6 +147,7 @@ def sources():
     return {
         "weather": {"status": "Prepared Real Dataset" if len(weather) else "Unavailable", "records": len(weather), "manifest": manifest("weather")},
         "live_weather": {"status": "Live API", "provider": "Open-Meteo Historical Weather", "model": "ERA5", "interactive_max_days": 367, "interactive_max_locations": 3, "supported_period": ["2010-01-01", "2025-12-31"]},
+        "live_solar": {"status": "Live API", "provider": "NASA POWER Daily", "parameters": ["ALLSKY_SFC_SW_DWN", "T2M"], "time_standard": "UTC", "interactive_max_days": 367, "interactive_max_locations": 3},
         "coverage": "Partial coverage — five registered representative weather points in the prepared snapshot, 2024–2025.",
         "quality": quality,
     }
@@ -236,6 +252,83 @@ async def fetch(request: FetchRequest, auth=Depends(session)):
     return {"status": state["weather_source"], "records": len(frame), "errors": errors, "cache_hits": cache_hits, "preview": frame.head(8).to_dict("records"), "retrieved_at": state["retrieved_at"], "observation_period": [actual["min_date"], actual["max_date"]], "variables": [name for name in WEATHER_COLUMNS if state["weather"][name].notna().any()]}
 
 
+@app.post("/api/multisource/validate")
+async def multisource_validate(request: MultiValidateRequest, auth=Depends(session)):
+    """Fetch and preview both providers without merging or changing active data."""
+    _, state = auth
+    if len(state["requests"]) >= 12:
+        raise HTTPException(429, "Session request limit reached")
+    state["requests"].append(time.time())
+    if request.method not in {"merge", "compare"}:
+        raise HTTPException(400, "Choose Merge Datasets or Compare Data Sources")
+    if not request.weather_variables or set(request.weather_variables) - set(WEATHER_COLUMNS):
+        raise HTTPException(400, "Choose supported Open-Meteo variables")
+    if not request.include_nasa and request.method == "compare":
+        raise HTTPException(400, "Source comparison requires NASA POWER")
+    try:
+        weather_result, nasa_result = await asyncio.gather(
+            fetch_weather(request.locations, request.start_date, request.end_date, request.weather_variables, "UTC"),
+            fetch_nasa(request.locations, request.start_date, request.end_date, request.nasa_variables) if request.include_nasa else asyncio.sleep(0, result=(None, {}, [], 0)),
+        )
+        weather_raw, weather_errors, weather_cache_hits = weather_result
+        nasa_raw, metadata, nasa_errors, nasa_cache_hits = nasa_result
+        if weather_raw.empty or (request.include_nasa and nasa_raw.empty):
+            raise ValueError("Provider returned no usable data: " + "; ".join(weather_errors + nasa_errors))
+        if weather_raw.duplicated(["location_id", "date"]).any():
+            raise ValueError("Open-Meteo returned duplicate location-date keys")
+        weather = prepare_weather(weather_raw)
+        nasa, transform = normalize_nasa(nasa_raw, metadata) if request.include_nasa else (None, None)
+        report = validate_sources(weather, nasa, metadata, request.locations)
+        report["provider_errors"] = weather_errors + nasa_errors
+        report["cache_hits"] = {"openmeteo": weather_cache_hits, "nasa": nasa_cache_hits}
+        report["unit_transformation"] = transform
+        if report["provider_errors"]:
+            report["warnings"].append("Some requested locations failed; review provider errors before analysis.")
+        validation_id = secrets.token_urlsafe(16)
+        retrieved_at = datetime.now(timezone.utc).isoformat()
+        state["multisource"] = {"validation_id": validation_id, "primary": weather, "secondary": nasa, "metadata": metadata, "report": report, "selection": request.model_dump(mode="json"), "retrieved_at": retrieved_at}
+        return {"validation_id": validation_id, "report": report, "retrieved_at": retrieved_at, "primary_preview": json.loads(weather.head(8).to_json(orient="records", date_format="iso")), "nasa_preview": json.loads(nasa.head(8).to_json(orient="records", date_format="iso")) if nasa is not None else []}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/multisource/merge")
+def multisource_merge(request: MultiMergeRequest, auth=Depends(session)):
+    """Activate only the exact dataset that passed this session's validation."""
+    token, state = auth
+    validated = state.get("multisource")
+    if not validated or request.validation_id != validated["validation_id"]:
+        raise HTTPException(409, "Validate the selected datasets before merging")
+    try:
+        merged, quality = merge_sources(validated["primary"], validated["secondary"], validated["report"])
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    state["merged"] = merged
+    state["weather"] = merged
+    state["weather_source"] = "Open-Meteo + NASA POWER" if validated["secondary"] is not None else "Open-Meteo UTC"
+    state["retrieved_at"] = validated["retrieved_at"]
+    for key, value in list(results.items()):
+        if value["session_id"] == token:
+            del results[key]
+    return {"status": quality["status"], "merge_quality": quality, "observation_period": [str(merged.date.min().date()), str(merged.date.max().date())], "records": len(merged), "source": state["weather_source"], "manifest": {"providers": validated["report"]["providers"], "requested_locations": validated["report"]["requested_locations"], "openmeteo_grid": validated["report"]["openmeteo_grid"], "nasa_grid": validated["report"]["nasa_grid"], "nasa_parameter_metadata": validated["report"]["nasa_parameter_metadata"], "unit_transformation": validated["report"]["unit_transformation"], "time_standard": "UTC", "retrieved_at": validated["retrieved_at"]}}
+
+
+@app.get("/api/multisource/report")
+def multisource_report(auth=Depends(session)):
+    _, state = auth
+    validated = state.get("multisource")
+    if not validated:
+        raise HTTPException(404, "No validated multi-source dataset in this session")
+    return validated["report"]
+
+
+@app.get("/api/multisource/report.csv")
+def multisource_report_csv(auth=Depends(session)):
+    report = multisource_report(auth)
+    rows = [{"metric": key, "value": json.dumps(value, default=str) if isinstance(value, (dict, list)) else value} for key, value in report.items()]
+    return Response(pd.DataFrame(rows).to_csv(index=False), media_type="text/csv", headers={"Content-Disposition": 'attachment; filename="merge-quality-report.csv"'})
+
+
 def parse_upload(name: str, content: bytes) -> pd.DataFrame:
     suffix = Path(name).suffix.lower()
     if suffix == ".csv":
@@ -320,37 +413,48 @@ def use_upload(request: UseUploadRequest, auth=Depends(session)):
 @app.post("/api/analysis")
 def analyze(request: AnalysisRequest, auth=Depends(session)):
     token, state = auth
-    if request.chart_id not in CHARTS:
+    integrated = request.chart_id in MS_CHARTS
+    if request.chart_id not in CHARTS and not integrated:
         raise HTTPException(404, "Unknown chart")
     try:
+        if integrated and (request.source != "session" or state.get("merged") is None or (state.get("multisource") or {}).get("secondary") is None):
+            raise ValueError("Validate and merge Open-Meteo with NASA POWER before this analysis")
         weather, weather_status, _ = selected_weather(request.source, state)
         unknown = set(request.locations) - set(weather.location_id.unique())
         if unknown:
             raise ValueError(f"Locations are absent from the selected dataset: {', '.join(sorted(unknown))}")
         weather = filter_weather(weather, request.locations, str(request.start_date) if request.start_date else None, str(request.end_date) if request.end_date else None)
-        table, units, caveats, facts = prepare_chart(request.chart_id, weather, request.variable, request.aggregation, request.relationship_aggregation)
+        if integrated:
+            table, units, facts, caveats = prepare_multisource_chart(request.chart_id, weather)
+        else:
+            table, units, caveats, facts = prepare_chart(request.chart_id, weather, request.variable, request.aggregation, request.relationship_aggregation)
         if table.empty:
             raise ValueError("No valid observations after filtering")
-        figure = render_chart(request.chart_id, table)
+        figure = render_multisource_chart(request.chart_id, table) if integrated else render_chart(request.chart_id, table)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     filters = request.model_dump(mode="json")
     version = f"weather:{hashlib.sha256(weather.to_csv(index=False).encode()).hexdigest()[:12]}"
-    source_list = [weather_status, "Open-Meteo ERA5 reanalysis" if weather_status != "Uploaded Dataset" else "Uploaded weather dataset"]
+    source_list = ["Open-Meteo ERA5", "NASA POWER"] if integrated else [weather_status, "Open-Meteo ERA5 reanalysis" if weather_status != "Uploaded Dataset" else "Uploaded weather dataset"]
     result_id = secrets.token_urlsafe(24)
     record = {
         "analysis_id": result_id, "dataset_version": version, "filter_hash": filter_hash(filters), "chart_id": request.chart_id,
-        "renderer": "Folium" if request.chart_id == "map" else "Plotly for Python" if request.chart_id == "treemap" else "Seaborn / Matplotlib" if request.chart_id != "mosaic" else "Statsmodels / Matplotlib",
+        "renderer": "Folium" if request.chart_id in {"map", "solar_map"} else "Plotly for Python" if request.chart_id == "treemap" else "Seaborn / Matplotlib" if request.chart_id != "mosaic" else "Statsmodels / Matplotlib",
         "figure": figure, "supporting_data": table.head(30).replace({pd.NaT: None}).to_json(orient="records", date_format="iso"),
         "supporting_columns": list(table.columns), "supporting_count": len(table),
-        "computed_facts": interpretation(request.chart_id, table, caveats, facts), "python_source": code_for(request.chart_id),
+        "computed_facts": multisource_interpretation(request.chart_id, table, facts, caveats) if integrated else interpretation(request.chart_id, table, caveats, facts), "python_source": multisource_code(request.chart_id) if integrated else code_for(request.chart_id),
         "statistics": facts,
         "sources": source_list,
         "limitations": caveats, "units": units, "filters": filters, "sample_size": len(table),
         "session_id": token, "expires": time.time() + SESSION_TTL, "table": table,
     }
+    if integrated:
+        validated = state["multisource"]
+        record["primary_input"] = validated["primary"]
+        record["nasa_input"] = validated["secondary"]
+        record["source_manifest"] = {"report": validated["report"], "selection": validated["selection"], "retrieved_at": validated["retrieved_at"]}
     results[result_id] = record
-    return {key: (json.loads(value) if key == "supporting_data" else value) for key, value in record.items() if key not in ("session_id", "expires", "table")}
+    return {key: (json.loads(value) if key == "supporting_data" else value) for key, value in record.items() if key not in ("session_id", "expires", "table", "primary_input", "nasa_input", "source_manifest")}
 
 
 def own_result(analysis_id: str, auth: tuple[str, dict]) -> dict:
@@ -364,7 +468,7 @@ def own_result(analysis_id: str, auth: tuple[str, dict]) -> dict:
 @app.get("/api/analysis/{analysis_id}")
 def get_analysis(analysis_id: str, auth=Depends(session)):
     result = own_result(analysis_id, auth)
-    return {key: (json.loads(value) if key == "supporting_data" else value) for key, value in result.items() if key not in ("session_id", "expires", "table")}
+    return {key: (json.loads(value) if key == "supporting_data" else value) for key, value in result.items() if key not in ("session_id", "expires", "table", "primary_input", "nasa_input", "source_manifest")}
 
 
 @app.get("/api/export/{analysis_id}/data")
@@ -375,12 +479,16 @@ def export_data(analysis_id: str, auth=Depends(session)):
 
 def reproduction_script(result: dict) -> str:
     chart_id = result["chart_id"]
-    builder = CHARTS[chart_id][4]
+    builder = MS_BUILDERS[chart_id] if chart_id in MS_BUILDERS else CHARTS[chart_id][4]
     source = result["python_source"]["visualization"]
     script = """import html\nimport pandas as pd\nimport numpy as np\nimport seaborn as sns\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nimport plotly.express as px\nimport folium\nfrom statsmodels.graphics.mosaicplot import mosaic\n\n"""
     script += f"PALETTE = {PALETTE!r}\n\n{source}\n"
-    script += f"table = pd.read_csv('chart_input.csv')\noutput = {builder.__name__}(table)\n"
-    script += "output.write_html('chart.html')\n" if chart_id == "treemap" else "open('chart.html', 'w').write(output)\n" if chart_id == "map" else "output.savefig('chart.png', dpi=145, bbox_inches='tight')\n"
+    script += "table = pd.read_csv('chart_input.csv', parse_dates=['date'] if 'date' in pd.read_csv('chart_input.csv', nrows=0).columns else None)\n"
+    if chart_id in MS_BUILDERS:
+        script += "primary = pd.read_csv('openmeteo_input.csv', parse_dates=['date'])\nnasa = pd.read_csv('nasa_input.csv', parse_dates=['date'])\n"
+        script += "merged = pd.merge(primary, nasa, on=['location_id', 'date'], how='left', validate='one_to_one', indicator=True)\nprint('Validated merged rows:', len(merged))\n"
+    script += f"output = {builder.__name__}(table)\n"
+    script += "output.write_html('chart.html')\n" if chart_id == "treemap" else "open('chart.html', 'w').write(output)\n" if chart_id in {"map", "solar_map"} else "output.savefig('chart.png', dpi=145, bbox_inches='tight')\n"
     return script
 
 
@@ -400,6 +508,10 @@ def export_package(analysis_id: str, auth=Depends(session)):
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("reproduce.py", script)
         archive.writestr("chart_input.csv", result["table"].to_csv(index=False))
+        if chart_id in MS_BUILDERS:
+            archive.writestr("openmeteo_input.csv", result["primary_input"].to_csv(index=False))
+            archive.writestr("nasa_input.csv", result["nasa_input"].to_csv(index=False))
+            archive.writestr("source_manifest.json", json.dumps(result["source_manifest"], indent=2, default=str))
         archive.writestr("README.json", json.dumps(meta, indent=2))
         archive.writestr("requirements.txt", "pandas\nnumpy\nseaborn\nmatplotlib\nplotly\nfolium\nstatsmodels\n")
     return Response(buffer.getvalue(), media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{chart_id}-reproduction.zip"'})

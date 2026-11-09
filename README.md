@@ -29,6 +29,8 @@ The checked-in real ERA5 snapshot contains 3,655 daily rows for five representat
 
 Use the Overview date-range controls to select dates within the loaded dataset, choose a sample location or Negros Oriental, and Apply Filters. The eight climate KPI cards, Chapter 08 visualizations, two relationship plots, and Chapter 09 Folium map use the selected weather rows. Each chart exposes its actual Python builder, deterministic interpretation, evidence, and reproduction package. API Sources fetches bounded Open-Meteo periods; Dataset Upload accepts compatible CSV, Parquet, or weather JSON in a private session.
 
+Multi-Source Manager adds live Open-Meteo ERA5 and NASA POWER daily retrieval, UTC compatibility validation, a one-to-one left merge, source comparison, six paired-source charts/maps, source manifests, and quality reports. A separate analysis date range reruns paired calculations on filtered observations. The original Asia/Manila analytics and upload path remain available. The live manager currently uses registered sample points, up to three locations and 367 dates per request; upload mapping is weather-only, and full-period integrated datasets require a separate bounded retrieval workflow.
+
 The five-point snapshot is a presentation fallback. The API is limited to three points and 367 days per visitor request. The full 2010–2025 period is prepared separately with:
 
     .venv/bin/python scripts/fetch_weather.py --start 2010-01-01 --end 2025-12-31
