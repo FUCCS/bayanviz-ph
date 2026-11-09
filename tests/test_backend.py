@@ -80,6 +80,21 @@ def test_monthly_and_annual_rainfall_are_per_location_and_incomplete():
     assert annual.loc[annual.location_id.eq("cebu"), "precipitation_mm"].iloc[0] == 2
 
 
+def test_monthly_precipitation_evidence_identifies_years():
+    dates = list(pd.date_range("2024-01-01", "2024-01-31")) + list(pd.date_range("2025-01-01", "2025-01-31"))
+    weather = prepare_weather(pd.DataFrame({
+        "location_id": "dumaguete", "date": dates, "model": "fixture",
+        "temperature_mean_c": 27, "precipitation_mm": [1] * 31 + [3] * 31,
+        "wind_speed_max_kmh": 10,
+    }))
+    all_years, _, _, _ = prepare_chart("bar", weather)
+    assert all_years.iloc[0].years_covered == "2024,2025"
+    assert all_years.iloc[0].average_monthly_mm == 62
+    selected, _, _, _ = prepare_chart("bar", filter_weather(weather, [], "2025-01-01", "2025-01-31"))
+    assert selected.iloc[0].years_covered == "2025"
+    assert selected.iloc[0].average_monthly_mm == 93
+
+
 def test_summary_uses_filtered_values_and_completeness():
     weather = filter_weather(sample(), ["dumaguete"], "2024-01-01", "2024-01-03")
     summary = climate_summary(weather, "2024-01-01", "2024-01-03", {}, "Uploaded Dataset")

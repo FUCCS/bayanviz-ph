@@ -27,7 +27,9 @@ PALETTE = {"rainy": "#1f7fa8", "dry": "#e2a548"}
 def build_bar(table: pd.DataFrame):
     fig, ax = plt.subplots(figsize=(9, 5))
     sns.barplot(data=table, x="month", y="average_monthly_mm", hue="location_name", errorbar=None, ax=ax)
-    ax.set(xlabel="Month", ylabel="Average complete-month precipitation total (mm)", title="Monthly rainfall at uploaded locations")
+    years = sorted({year for item in table.years_covered for year in str(item).split(",")})
+    title = f"Monthly rainfall in {years[0]}" if len(years) == 1 else f"Monthly rainfall averaged across {len(years)} years"
+    ax.set(xlabel="Month", ylabel="Average complete-month precipitation total (mm)", title=title)
     ax.legend(title="Location", bbox_to_anchor=(1.01, 1), loc="upper left")
     fig.tight_layout()
     return fig
@@ -196,7 +198,7 @@ def prepare_chart(chart_id: str, weather: pd.DataFrame, variable: str = "tempera
             table = table[table.rainy_days.gt(0)].copy()
             table["month"] = table.month.astype(str).str.zfill(2)
             return table, "rainy days", caveats + ["Rainy means daily precipitation ≥1 mm. Counts are additive observations, not rainfall depths."], facts
-        table = monthly.groupby(["location_id", "month"], as_index=False).agg(average_monthly_mm=("precipitation_mm", "mean"), valid_months=("precipitation_mm", "count"))
+        table = monthly.groupby(["location_id", "month"], as_index=False).agg(average_monthly_mm=("precipitation_mm", "mean"), valid_months=("precipitation_mm", "count"), years_covered=("year", lambda years: ",".join(map(str, sorted(years.unique())))))
         table["location_name"] = table.location_id.map(location_name)
         return table, "mm", caveats + ["Only months with at least 90% valid daily rainfall values contribute to the monthly comparison."], facts
     if chart_id == "line":
@@ -293,7 +295,7 @@ def interpretation(chart_id: str, table: pd.DataFrame, caveats: list[str], facts
             finding = f"Pearson r = {r:.3f} across {count} matched observations: a {strength} {'positive' if r > 0 else 'negative'} association."
     elif chart_id in {"bar", "heatmap"}:
         leader = table.sort_values("average_monthly_mm", ascending=False).iloc[0]
-        finding = f"The highest shown complete-month mean is {leader.average_monthly_mm:.1f} mm at {leader.location_name} in month {int(leader.month)} ({int(leader.valid_months)} valid months)."
+        finding = f"The highest shown complete-month mean is {leader.average_monthly_mm:.1f} mm at {leader.location_name} in month {int(leader.month)}, covering year(s) {leader.years_covered} ({int(leader.valid_months)} valid months)."
     elif chart_id == "year_compare":
         changes = facts["annual_changes"]
         finding = "; ".join(f"{item['location_name']}: {item['first_year']} to {item['last_year']} changed by {item['change_c']:+.2f} °C" for item in changes)
