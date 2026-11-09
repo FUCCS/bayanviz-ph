@@ -6,7 +6,7 @@ Weather uploads accept CSV, Parquet, or an Open-Meteo-style JSON download. Requi
 
 Secondary solar uploads accept NASA POWER JSON or compatible CSV/Parquet. Tabular uploads need an explicit column mapping and user-declared solar unit and UTC daily time standard. NASA JSON retains reported parameter units and metadata. Solar is normalized to kWh/m²/day. These declarations are not independent proof of provider origin or quality.
 
-Live API requests use registered point coordinates and bounded historical dates. A one-location, seven-day weather request is the default. Successful provider responses are cached in process memory for six hours; cache entries disappear when the backend restarts. Provider latency and free-host cold starts can still delay or fail a request, so uploads remain a usable source path.
+Live API requests use registered point coordinates and bounded historical dates. A one-location, seven-day weather request is the default, and the standalone weather fetch supports up to 3,653 days for multi-year comparison. The solar API and paired-source workflow remain limited to 367 days. Successful provider responses are cached in process memory for six hours; cache entries disappear when the backend restarts. Provider latency and free-host cold starts can still delay or fail a request, so uploads remain a usable source path.
 
 The integration report discloses coverage, missing values, matched and unmatched location/date pairs, conversion factors, and source metadata. A one-to-one left merge keeps every primary weather row and leaves missing solar values empty. Paired analyses use only valid pairs.
 

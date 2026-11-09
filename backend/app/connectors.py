@@ -15,6 +15,7 @@ NASA_URL = "https://power.larc.nasa.gov/api/temporal/daily/point"
 VARIABLES = {"temperature_mean_c": "temperature_2m_mean", "temperature_min_c": "temperature_2m_min", "temperature_max_c": "temperature_2m_max", "precipitation_mm": "precipitation_sum", "wind_speed_max_kmh": "wind_speed_10m_max"}
 NASA_VARIABLES = {"solar_radiation": "ALLSKY_SFC_SW_DWN", "nasa_temperature_mean_c": "T2M"}
 WEATHER_CACHE_TTL = 6 * 3600
+MAX_WEATHER_DAYS = 3653
 CACHE_MAX_ENTRIES = 128
 weather_cache: dict[tuple[str, str, str, tuple[str, ...], str], tuple[float, pd.DataFrame]] = {}
 nasa_cache: dict[tuple[str, str, str, tuple[str, ...]], tuple[float, pd.DataFrame, dict]] = {}
@@ -23,8 +24,8 @@ nasa_cache: dict[tuple[str, str, str, tuple[str, ...]], tuple[float, pd.DataFram
 async def fetch_weather(location_ids: list[str], start: date, end: date, variables: list[str] | None = None, timezone_name: str = "Asia/Manila") -> tuple[pd.DataFrame, list[str], int]:
     if not location_ids or len(location_ids) > 3 or any(key not in LOCATIONS for key in location_ids):
         raise ValueError("Choose one to three registered locations")
-    if (end - start).days < 0 or (end - start).days > 366 or end >= date.today():
-        raise ValueError("Choose up to 367 historical days ending before today")
+    if (end - start).days < 0 or (end - start).days >= MAX_WEATHER_DAYS or end >= date.today():
+        raise ValueError("Choose up to 3,653 historical weather days ending before today")
     selected = tuple(sorted(set(variables or VARIABLES)))
     if not selected or set(selected) - set(VARIABLES):
         raise ValueError("Choose supported climate variables")

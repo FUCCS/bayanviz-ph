@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from app.charts import REGISTRY
+from app.charts import REGISTRY, interpretation, prepare_chart
 from app.main import app, parse_upload
 from app.processing import RAINY_DAY_MM, climate_summary, correlation_table, date_bounds, filter_weather, period_table, prepare_weather
 
@@ -104,7 +104,7 @@ def test_correlation_pairs_by_location_and_date():
     assert correlation_table(constant, "precipitation_mm", "temperature_mean_c")[1] is None
 
 
-@pytest.mark.parametrize("chart_id,figure_type", [("bar","png"),("line","png"),("box","png"),("bubble","png"),("rain_wind","png"),("heatmap","png"),("mosaic","png"),("treemap","plotly"),("map","html")])
+@pytest.mark.parametrize("chart_id,figure_type", [("bar","png"),("line","png"),("year_compare","png"),("box","png"),("bubble","png"),("rain_wind","png"),("heatmap","png"),("mosaic","png"),("treemap","plotly"),("map","html")])
 def test_every_chart_uses_climate_and_actual_builder(chart_id, figure_type):
     header = session()
     response = client.post("/api/analysis", headers=header, json={"chart_id": chart_id, "locations": ["dumaguete"], "start_date": "2024-01-01", "end_date": "2025-12-31"})
@@ -212,6 +212,19 @@ def test_api_fetch_populates_selectable_dataset(monkeypatch):
     assert uploaded["min_date"] == "2025-01-01"
     assert fetched_again["records"] == 3
     assert fetched_again["min_date"] == "2024-01-01"
+
+
+def test_year_comparison_requires_complete_years_and_reports_change():
+    dates = pd.date_range("2020-01-01", "2021-12-31")
+    weather = prepare_weather(pd.DataFrame({"location_id": "dumaguete", "date": dates, "model": "test_fixture", "temperature_mean_c": [26 if day.year == 2020 else 27 for day in dates]}))
+    table, units, caveats, facts = prepare_chart("year_compare", weather)
+    assert table.year.tolist() == [2020, 2021]
+    assert table.temperature_valid_days.tolist() == [366, 365]
+    assert facts["annual_changes"][0]["change_c"] == 1
+    assert "+1.00 °C" in interpretation("year_compare", table, caveats, facts)["findings"]
+    assert units == "°C"
+    with pytest.raises(ValueError, match="at least two calendar years"):
+        prepare_chart("year_compare", weather.iloc[:366])
 
 
 def test_exported_script_runs_independently(tmp_path: Path):

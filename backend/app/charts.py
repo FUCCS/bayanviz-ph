@@ -48,6 +48,16 @@ def build_line(table: pd.DataFrame):
     return fig
 
 
+def build_year_compare(table: pd.DataFrame):
+    fig, ax = plt.subplots(figsize=(9, 5))
+    sns.lineplot(data=table, x="year", y="temperature_mean_c", hue="location_name", marker="o", estimator=None, ax=ax)
+    ax.set(xlabel="Calendar year", ylabel="Annual mean daily temperature (°C)", title="Year-by-year temperature at registered points")
+    ax.set_xticks(sorted(table.year.unique()))
+    ax.legend(title="Location", bbox_to_anchor=(1.01, 1), loc="upper left")
+    fig.tight_layout()
+    return fig
+
+
 def build_box(table: pd.DataFrame):
     fig, ax = plt.subplots(figsize=(9, 5))
     variable = str(table.variable.iloc[0])
@@ -134,6 +144,7 @@ def build_map(table: pd.DataFrame):
 REGISTRY = {
     "bar": ("Chapter 08", "Seaborn bar graph", "sns.barplot()", "Compare mean monthly precipitation totals at locations", build_bar, "weather"),
     "line": ("Chapter 08", "Seaborn line graph", "sns.lineplot()", "Inspect daily, monthly, or annual climate trends", build_line, "weather"),
+    "year_compare": ("Chapter 08", "Annual temperature comparison", "sns.lineplot()", "Compare complete-year mean temperatures at the same location", build_year_compare, "weather"),
     "box": ("Chapter 08", "Seaborn box plot", "sns.boxplot()", "Compare daily climate distributions", build_box, "weather"),
     "bubble": ("Chapter 08", "Bubble chart", "sns.scatterplot()", "Explore paired temperature and rainfall; bubble area is wind speed", build_bubble, "weather"),
     "rain_wind": ("Chapter 08", "Rainfall–wind relationship", "sns.scatterplot()", "Explore paired rainfall and maximum wind speed", build_rain_wind, "weather"),
@@ -160,6 +171,19 @@ def prepare_chart(chart_id: str, weather: pd.DataFrame, variable: str = "tempera
     region_name = lambda key: LOCATIONS.get(key, {}).get("region", "Uploaded location")
     caveats = ["ERA5 values are modeled estimates at representative coordinates, not province-wide station observations.", "Partial periods and missing values are never filled with invented observations."]
     facts = {}
+    if chart_id == "year_compare":
+        annual = period_table(weather, "annual")
+        annual = annual[annual.complete_temperature & annual.temperature_mean_c.notna()].copy()
+        annual = annual.groupby("location_id").filter(lambda group: group.year.nunique() >= 2)
+        if annual.empty:
+            raise ValueError("Select at least two calendar years with 90% valid daily temperatures at the same location")
+        annual["location_name"] = annual.location_id.map(location_name)
+        table = annual[["location_id", "location_name", "year", "temperature_mean_c", "temperature_valid_days", "expected_days", "temperature_coverage_pct"]].sort_values(["location_id", "year"])
+        changes = []
+        for key, group in table.groupby("location_id"):
+            first, last = group.iloc[0], group.iloc[-1]
+            changes.append({"location_id": key, "location_name": first.location_name, "first_year": int(first.year), "last_year": int(last.year), "change_c": round(float(last.temperature_mean_c - first.temperature_mean_c), 2)})
+        return table, "°C", caveats + ["Only calendar years with at least 90% valid daily temperature values are shown. Gaps are not interpolated.", "This compares air temperature, not heat index; heat index also requires humidity."], {"annual_changes": changes}
     if chart_id in {"bar", "heatmap", "treemap"}:
         monthly = period_table(weather, "monthly")
         monthly = monthly[monthly.complete_rainfall & monthly.precipitation_mm.notna()].copy()
@@ -270,6 +294,10 @@ def interpretation(chart_id: str, table: pd.DataFrame, caveats: list[str], facts
     elif chart_id in {"bar", "heatmap"}:
         leader = table.sort_values("average_monthly_mm", ascending=False).iloc[0]
         finding = f"The highest shown complete-month mean is {leader.average_monthly_mm:.1f} mm at {leader.location_name} in month {int(leader.month)} ({int(leader.valid_months)} valid months)."
+    elif chart_id == "year_compare":
+        changes = facts["annual_changes"]
+        finding = "; ".join(f"{item['location_name']}: {item['first_year']} to {item['last_year']} changed by {item['change_c']:+.2f} °C" for item in changes)
+        finding += ". Each point is a mean of valid daily temperatures in a calendar year."
     elif chart_id == "line":
         leader = table.sort_values("measure_value", ascending=False).iloc[0]
         unit = "mm" if leader.variable == "precipitation_mm" else "km/h" if leader.variable == "wind_speed_max_kmh" else "°C"
@@ -292,5 +320,5 @@ def interpretation(chart_id: str, table: pd.DataFrame, caveats: list[str], facts
 
 def code_for(chart_id: str) -> dict:
     entry = REGISTRY[chart_id]
-    highlights = {"bar": ["sns.barplot"], "line": ["sns.lineplot"], "box": ["sns.boxplot"], "bubble": ["sns.scatterplot"], "rain_wind": ["sns.scatterplot"], "heatmap": ["pivot_table", "sns.heatmap"], "mosaic": ["mosaic("], "treemap": ["px.treemap"], "map": ["folium.Map", "folium.Marker", "folium.CircleMarker"]}
+    highlights = {"bar": ["sns.barplot"], "line": ["sns.lineplot"], "year_compare": ["sns.lineplot"], "box": ["sns.boxplot"], "bubble": ["sns.scatterplot"], "rain_wind": ["sns.scatterplot"], "heatmap": ["pivot_table", "sns.heatmap"], "mosaic": ["mosaic("], "treemap": ["px.treemap"], "map": ["folium.Map", "folium.Marker", "folium.CircleMarker"]}
     return {"visualization": inspect.getsource(entry[4]), "preparation": inspect.getsource(prepare_chart), "topic": {"chapter": entry[0], "topic": entry[1], "library_function": entry[2], "objective": entry[3]}, "highlights": highlights[chart_id]}

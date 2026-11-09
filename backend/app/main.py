@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from .catalog import LOCATIONS
 from .charts import PALETTE, REGISTRY as CHARTS, code_for, interpretation, prepare_chart, render_chart
-from .connectors import fetch_nasa, fetch_weather, parse_nasa_payload
+from .connectors import MAX_WEATHER_DAYS, fetch_nasa, fetch_weather, parse_nasa_payload
 from .multisource import MS_BUILDERS, MS_CHARTS, merge_sources, multisource_code, multisource_interpretation, normalize_nasa, prepare_multisource_chart, render_multisource_chart, validate_sources
 from .processing import MIN_PERIOD_COVERAGE, RAINY_DAY_MM, WEATHER_COLUMNS, climate_summary, date_bounds, filter_hash, filter_weather, period_table, prepare_weather, safe_number
 
@@ -185,7 +185,7 @@ def sources():
     return {
         "weather": {"status": "Upload or API fetch required", "records": 0},
         "solar": {"status": "Upload or API fetch required", "records": 0},
-        "live_weather": {"provider": "Open-Meteo Historical Weather", "model": "ERA5", "max_days": 367, "max_locations": 3},
+        "live_weather": {"provider": "Open-Meteo Historical Weather", "model": "ERA5", "max_days": MAX_WEATHER_DAYS, "max_locations": 3},
         "live_solar": {"provider": "NASA POWER Daily", "time_standard": "UTC", "max_days": 367, "max_locations": 3},
         "coverage": "No dataset is bundled. Upload source files or fetch a short API period to begin.",
     }
