@@ -1,12 +1,12 @@
 # Data dictionary
 
-The app starts without observations. Users upload a weather dataset, then optionally a solar dataset. The weather key is `location_id, date, model`; paired integration requires one row per `location_id, date`. Accepted location IDs appear in `data/reference/locations.json`. They denote points, not province-wide averages.
+The app starts without observations. Users upload or fetch a weather dataset, then optionally upload or fetch a solar dataset. The weather key is `location_id, date, model`; paired integration requires one row per `location_id, date`. Accepted location IDs appear in `data/reference/locations.json`. They denote points, not province-wide averages.
 
 | Field | Unit and meaning |
 |---|---|
 | `location_id` | Registered location ID |
 | `date` | UTC daily date for integration |
-| `model` | Source model or method identifier supplied by the uploader |
+| `model` | Source model or method identifier supplied by the uploader or API |
 | `temperature_mean_c` | Daily mean air temperature, °C |
 | `temperature_min_c` | Daily minimum air temperature, °C |
 | `temperature_max_c` | Daily maximum air temperature, °C |

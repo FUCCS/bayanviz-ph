@@ -187,10 +187,31 @@ def test_open_meteo_json_adapter():
     assert clean.iloc[0].wind_speed_max_kmh == 18
 
 
-def test_external_weather_fetch_is_not_exposed():
+def test_api_fetch_populates_selectable_dataset(monkeypatch):
     header = {"X-Session-Id": client.post("/api/session").json()["session_id"]}
-    response = client.post("/api/fetch/weather", headers=header, json={"locations": ["dumaguete"]})
-    assert response.status_code == 404
+    invalid = client.post("/api/fetch/weather", headers=header, json={"locations": ["dumaguete"]})
+    assert invalid.status_code == 422
+    async def provider(locations, start, end, variables, standard):
+        assert standard == "UTC"
+        return sample().query("location_id == 'dumaguete'"), [], 1
+    monkeypatch.setattr("app.main.fetch_weather", provider)
+    fetched = client.post("/api/fetch/weather", headers=header, json={"locations": ["dumaguete"], "start_date": "2024-01-01", "end_date": "2024-01-03"})
+    assert fetched.status_code == 200, fetched.text
+    assert fetched.json()["status"] == "Cached API"
+    assert fetched.json()["locations"] == ["dumaguete"]
+    selected = client.post("/api/dataset", headers=header, json={"source": "api"})
+    assert selected.status_code == 200
+    assert selected.json()["records"] == 3
+    csv = b"location_id,date,model,temperature_mean_c\ndumaguete,2025-01-01,uploaded,29\n"
+    preview = client.post("/api/upload/preview", headers=header, files={"file": ("weather.csv", csv, "text/csv")}).json()
+    used = client.post("/api/upload/use", headers=header, json={"upload_id": preview["upload_id"], "time_standard": "UTC"})
+    assert used.status_code == 200, used.text
+    uploaded = client.post("/api/dataset", headers=header, json={"source": "upload"}).json()
+    fetched_again = client.post("/api/dataset", headers=header, json={"source": "api"}).json()
+    assert uploaded["records"] == 1
+    assert uploaded["min_date"] == "2025-01-01"
+    assert fetched_again["records"] == 3
+    assert fetched_again["min_date"] == "2024-01-01"
 
 
 def test_exported_script_runs_independently(tmp_path: Path):

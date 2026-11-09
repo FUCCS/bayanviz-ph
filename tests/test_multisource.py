@@ -187,3 +187,35 @@ def test_uploaded_tabular_secondary_requires_units_utc_and_mapping(monkeypatch):
     good = client.post("/api/multisource/validate", headers=header, json={**base, "nasa_solar_unit": "MJ/m^2/day", "nasa_temperature_unit": "C", "nasa_time_standard": "UTC"})
     assert good.status_code == 200, good.text
     assert good.json()["report"]["unit_transformation"]["conversion_factor"] == pytest.approx(1 / 3.6)
+
+
+@pytest.mark.parametrize("weather_source,nasa_source", [("api", "api"), ("api", "upload"), ("upload", "api")])
+def test_api_and_upload_source_combinations(monkeypatch, weather_source, nasa_source):
+    weather, nasa, metadata, _ = provider_frames()
+    raw_nasa = nasa[["location_id", "date", "nasa_solar_radiation", "nasa_temperature_mean_c"]]
+
+    async def fake_weather(*args):
+        assert args[-1] == "UTC"
+        return weather, [], 0
+
+    async def fake_nasa(*_args):
+        return raw_nasa, metadata, [], 0
+
+    monkeypatch.setattr("app.main.fetch_weather", fake_weather)
+    monkeypatch.setattr("app.main.fetch_nasa", fake_nasa)
+    header = {"X-Session-Id": client.post("/api/session").json()["session_id"]}
+    if weather_source == "upload":
+        seed_weather(header, weather)
+    params = {"locations": ["dumaguete"], "start_date": "2020-01-01", "end_date": "2020-01-04", "weather_source": weather_source, "nasa_source": nasa_source}
+    if nasa_source == "upload":
+        preview = client.post("/api/upload/preview", headers=header, files={"file": ("solar.csv", raw_nasa.to_csv(index=False), "text/csv")})
+        assert preview.status_code == 200
+        params.update({"nasa_upload_id": preview.json()["upload_id"], "nasa_mapping": {column: column for column in raw_nasa.columns}, "nasa_solar_unit": "kWh/m^2/day", "nasa_temperature_unit": "C", "nasa_time_standard": "UTC"})
+    validated = client.post("/api/multisource/validate", headers=header, json=params)
+    assert validated.status_code == 200, validated.text
+    report = validated.json()["report"]
+    assert report["primary_origin"] == ("Open-Meteo API" if weather_source == "api" else "user-upload")
+    assert report["secondary_origin"] == ("NASA POWER API" if nasa_source == "api" else "user-upload")
+    merged = client.post("/api/multisource/merge", headers=header, json={"validation_id": validated.json()["validation_id"]})
+    assert merged.status_code == 200, merged.text
+    assert merged.json()["merge_quality"]["paired_solar_rows"] == 3

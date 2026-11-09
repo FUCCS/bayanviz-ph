@@ -14,7 +14,7 @@ ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 NASA_URL = "https://power.larc.nasa.gov/api/temporal/daily/point"
 VARIABLES = {"temperature_mean_c": "temperature_2m_mean", "temperature_min_c": "temperature_2m_min", "temperature_max_c": "temperature_2m_max", "precipitation_mm": "precipitation_sum", "wind_speed_max_kmh": "wind_speed_10m_max"}
 NASA_VARIABLES = {"solar_radiation": "ALLSKY_SFC_SW_DWN", "nasa_temperature_mean_c": "T2M"}
-WEATHER_CACHE_TTL = 3600
+WEATHER_CACHE_TTL = 6 * 3600
 CACHE_MAX_ENTRIES = 128
 weather_cache: dict[tuple[str, str, str, tuple[str, ...], str], tuple[float, pd.DataFrame]] = {}
 nasa_cache: dict[tuple[str, str, str, tuple[str, ...]], tuple[float, pd.DataFrame, dict]] = {}
@@ -22,7 +22,7 @@ nasa_cache: dict[tuple[str, str, str, tuple[str, ...]], tuple[float, pd.DataFram
 
 async def fetch_weather(location_ids: list[str], start: date, end: date, variables: list[str] | None = None, timezone_name: str = "Asia/Manila") -> tuple[pd.DataFrame, list[str], int]:
     if not location_ids or len(location_ids) > 3 or any(key not in LOCATIONS for key in location_ids):
-        raise ValueError("Choose one to three registered sample locations")
+        raise ValueError("Choose one to three registered locations")
     if (end - start).days < 0 or (end - start).days > 366 or end >= date.today():
         raise ValueError("Choose up to 367 historical days ending before today")
     selected = tuple(sorted(set(variables or VARIABLES)))
@@ -30,12 +30,18 @@ async def fetch_weather(location_ids: list[str], start: date, end: date, variabl
         raise ValueError("Choose supported climate variables")
     if timezone_name not in {"Asia/Manila", "UTC"}:
         raise ValueError("Choose Asia/Manila or UTC daily time")
+    if len(location_ids) > 1:
+        parts = await asyncio.gather(*(fetch_weather([key], start, end, variables, timezone_name) for key in location_ids))
+        frames = [frame for frame, _, _ in parts if not frame.empty]
+        return (pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(),
+                [error for _, errors, _ in parts for error in errors],
+                sum(hits for _, _, hits in parts))
     now = time.monotonic()
     for key, (expiry, _) in list(weather_cache.items()):
         if expiry <= now:
             del weather_cache[key]
     frames, errors, cache_hits = [], [], 0
-    async with httpx.AsyncClient(timeout=httpx.Timeout(25.0), headers={"User-Agent": "BayanVizPH/0.1 educational analytics"}) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0), headers={"User-Agent": "BayanVizPH/0.1 educational analytics"}) as client:
         for key in location_ids:
             cache_key = (key, start.isoformat(), end.isoformat(), selected, timezone_name)
             cached = weather_cache.get(cache_key)
@@ -45,7 +51,7 @@ async def fetch_weather(location_ids: list[str], start: date, end: date, variabl
                 continue
             loc = LOCATIONS[key]
             params = {"latitude": loc["latitude"], "longitude": loc["longitude"], "start_date": start.isoformat(), "end_date": end.isoformat(), "daily": ",".join(VARIABLES[name] for name in selected), "timezone": timezone_name, "models": "era5"}
-            for attempt in range(3):
+            for attempt in range(2):
                 try:
                     response = await client.get(ARCHIVE_URL, params=params)
                     response.raise_for_status()
@@ -77,7 +83,7 @@ async def fetch_weather(location_ids: list[str], start: date, end: date, variabl
                     weather_cache[cache_key] = (time.monotonic() + WEATHER_CACHE_TTL, frame.copy())
                     break
                 except (httpx.HTTPError, KeyError, ValueError) as exc:
-                    if attempt == 2:
+                    if attempt == 1:
                         errors.append(f"{key}: {type(exc).__name__}")
                     else:
                         await asyncio.sleep(0.5 * 2**attempt)
@@ -125,18 +131,25 @@ def parse_nasa_payload(payload: dict, location_id: str, selected: tuple[str, ...
 
 async def fetch_nasa(location_ids: list[str], start: date, end: date, variables: list[str] | None = None) -> tuple[pd.DataFrame, dict, list[str], int]:
     if not location_ids or len(location_ids) > 3 or any(key not in LOCATIONS for key in location_ids):
-        raise ValueError("Choose one to three registered sample locations")
+        raise ValueError("Choose one to three registered locations")
     if (end - start).days < 0 or (end - start).days > 366 or end >= date.today():
         raise ValueError("Choose up to 367 historical days ending before today")
     selected = tuple(sorted(set(variables or ["solar_radiation"])))
     if not selected or set(selected) - set(NASA_VARIABLES) or "solar_radiation" not in selected:
         raise ValueError("Select NASA solar radiation and optional temperature")
+    if len(location_ids) > 1:
+        parts = await asyncio.gather(*(fetch_nasa([key], start, end, variables) for key in location_ids))
+        frames = [frame for frame, _, _, _ in parts if not frame.empty]
+        return (pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(),
+                {key: value for _, metadata, _, _ in parts for key, value in metadata.items()},
+                [error for _, _, errors, _ in parts for error in errors],
+                sum(hits for _, _, _, hits in parts))
     now = time.monotonic()
     for key, (expiry, _, _) in list(nasa_cache.items()):
         if expiry <= now:
             del nasa_cache[key]
     frames, metadata, errors, cache_hits = [], {}, [], 0
-    async with httpx.AsyncClient(timeout=httpx.Timeout(35.0), headers={"User-Agent": "BayanVizPH/0.2 educational analytics"}) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0), headers={"User-Agent": "BayanVizPH/0.2 educational analytics"}) as client:
         for key in location_ids:
             cache_key = (key, start.isoformat(), end.isoformat(), selected)
             cached = nasa_cache.get(cache_key)
@@ -147,7 +160,7 @@ async def fetch_nasa(location_ids: list[str], start: date, end: date, variables:
                 continue
             loc = LOCATIONS[key]
             params = {"parameters": ",".join(NASA_VARIABLES[name] for name in selected), "community": "RE", "longitude": loc["longitude"], "latitude": loc["latitude"], "start": start.strftime("%Y%m%d"), "end": end.strftime("%Y%m%d"), "format": "JSON", "time-standard": "UTC"}
-            for attempt in range(3):
+            for attempt in range(2):
                 try:
                     response = await client.get(NASA_URL, params=params)
                     response.raise_for_status()
@@ -159,7 +172,7 @@ async def fetch_nasa(location_ids: list[str], start: date, end: date, variables:
                     nasa_cache[cache_key] = (time.monotonic() + WEATHER_CACHE_TTL, frame.copy(), info.copy())
                     break
                 except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
-                    if attempt == 2:
+                    if attempt == 1:
                         errors.append(f"{key}: {type(exc).__name__}: {exc}")
                     else:
                         await asyncio.sleep(0.5 * 2**attempt)
