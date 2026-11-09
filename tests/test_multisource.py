@@ -167,7 +167,7 @@ def test_uploaded_nasa_json_keeps_provenance_and_merges(monkeypatch):
     validated = client.post("/api/multisource/validate", headers=header, json={"locations": ["dumaguete"], "start_date": "2020-01-01", "end_date": "2020-01-04", "nasa_upload_id": upload.json()["upload_id"], "nasa_mapping": {"location_id": "location_id", "date": "date", "nasa_solar_radiation": "nasa_solar_radiation", "nasa_temperature_mean_c": "nasa_temperature_mean_c"}})
     assert validated.status_code == 200, validated.text
     assert validated.json()["report"]["secondary_origin"] == "user-upload"
-    assert "not authenticated" in validated.json()["report"]["warnings"][-1]
+    assert any("not authenticated" in warning for warning in validated.json()["report"]["warnings"])
     merged = client.post("/api/multisource/merge", headers=header, json={"validation_id": validated.json()["validation_id"]})
     assert merged.status_code == 200
     assert merged.json()["merge_quality"]["paired_solar_rows"] == 3

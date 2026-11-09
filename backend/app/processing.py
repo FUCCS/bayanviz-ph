@@ -7,12 +7,34 @@ import json
 import numpy as np
 import pandas as pd
 
+from .catalog import LOCATIONS
+
 WEATHER_COLUMNS = ["temperature_mean_c", "temperature_min_c", "temperature_max_c", "precipitation_mm", "wind_speed_max_kmh"]
 ADVANCED_COLUMNS = ["relative_humidity_mean_pct", "apparent_temperature_mean_c", "cloud_cover_mean_pct", "sunshine_duration_hours", "wind_gust_max_kmh", "precipitation_hours", "wind_direction_dominant_deg", "dew_point_mean_c", "shortwave_radiation_mj_m2"]
 CLIMATE_COLUMNS = WEATHER_COLUMNS + ADVANCED_COLUMNS
 SCHEMA_VERSION = "climate-daily-v2"
 RAINY_DAY_MM = 1.0
 MIN_PERIOD_COVERAGE = 0.9
+
+
+def validate_coordinates(frame: pd.DataFrame, source: str) -> bool:
+    """Validate optional source coordinates against the registered sample point."""
+    has_lat, has_lon = "latitude" in frame, "longitude" in frame
+    if has_lat != has_lon:
+        raise ValueError(f"{source} needs both latitude and longitude columns")
+    if not has_lat:
+        return False
+    latitude = pd.to_numeric(frame["latitude"], errors="coerce")
+    longitude = pd.to_numeric(frame["longitude"], errors="coerce")
+    if latitude.isna().any() or longitude.isna().any() or not np.isfinite(latitude).all() or not np.isfinite(longitude).all():
+        raise ValueError(f"{source} has missing or invalid coordinates")
+    if latitude.abs().gt(90).any() or longitude.abs().gt(180).any():
+        raise ValueError(f"{source} has coordinates outside geographic bounds")
+    expected_lat = frame.location_id.map({key: loc["latitude"] for key, loc in LOCATIONS.items()})
+    expected_lon = frame.location_id.map({key: loc["longitude"] for key, loc in LOCATIONS.items()})
+    if expected_lat.isna().any() or expected_lon.isna().any() or ((latitude - expected_lat).abs().gt(0.75) | (longitude - expected_lon).abs().gt(0.75)).any():
+        raise ValueError(f"{source} coordinates do not match registered location_id values")
+    return True
 
 
 def prepare_weather(frame: pd.DataFrame) -> pd.DataFrame:

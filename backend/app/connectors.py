@@ -130,6 +130,8 @@ async def fetch_weather(location_ids: list[str], start: date, end: date, variabl
                             errors.append(f"{key}: Open-Meteo HTTP {exc.response.status_code}" + (f" — {reason}" if reason else ""))
                         else:
                             errors.append(f"{key}: {type(exc).__name__}: {str(exc)[:180]}")
+                        if permanent:
+                            break
                     else:
                         await asyncio.sleep(1.5 * 2**attempt)
     result = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()

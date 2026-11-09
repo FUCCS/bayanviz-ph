@@ -148,3 +148,29 @@ def test_long_weather_fetch_uses_complete_bounded_chunks(monkeypatch):
     assert len(requested) == 3
     assert max((pd.Timestamp(end) - pd.Timestamp(start)).days for start, end in requested) <= 364
     assert not frame.duplicated(["location_id", "date"]).any()
+
+
+def test_weather_provider_http_error_includes_status_and_reason(monkeypatch):
+    from app import connectors
+    import httpx
+
+    weather_cache.clear()
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, url, params):
+            request = httpx.Request("GET", url, params=params)
+            return httpx.Response(400, json={"reason": "Invalid daily parameter"}, request=request)
+
+    monkeypatch.setattr(connectors.httpx, "AsyncClient", Client)
+    frame, errors, _ = asyncio.run(fetch_weather(["dumaguete"], pd.Timestamp("2025-01-01").date(), pd.Timestamp("2025-01-07").date(), ["temperature_mean_c"], "UTC"))
+    assert frame.empty
+    assert errors == ["dumaguete: Open-Meteo HTTP 400 — Invalid daily parameter"]

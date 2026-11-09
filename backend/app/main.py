@@ -11,9 +11,10 @@ import time
 import zipfile
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import BinaryIO
 
 import pandas as pd
-from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -22,17 +23,17 @@ from .catalog import LOCATIONS
 from .charts import PALETTE, REGISTRY as CHARTS, code_for, interpretation, prepare_chart, render_chart
 from .connectors import MAX_WEATHER_DAYS, fetch_nasa, fetch_weather, parse_nasa_payload
 from .multisource import MS_BUILDERS, MS_CHARTS, merge_sources, multisource_code, multisource_interpretation, normalize_nasa, prepare_multisource_chart, render_multisource_chart, validate_sources
-from .processing import ADVANCED_COLUMNS, CLIMATE_COLUMNS, SCHEMA_VERSION, MIN_PERIOD_COVERAGE, RAINY_DAY_MM, WEATHER_COLUMNS, climate_summary, date_bounds, filter_hash, filter_weather, period_table, prepare_weather, safe_number
+from .processing import ADVANCED_COLUMNS, CLIMATE_COLUMNS, SCHEMA_VERSION, MIN_PERIOD_COVERAGE, RAINY_DAY_MM, WEATHER_COLUMNS, climate_summary, date_bounds, filter_hash, filter_weather, period_table, prepare_weather, safe_number, validate_coordinates
 
 app = FastAPI(title="BayanViz PH API", version="0.1.0")
 origins = [s.strip() for s in os.getenv("FRONTEND_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if s.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=False, allow_methods=["GET", "POST", "DELETE"], allow_headers=["Content-Type", "X-Session-Id"])
 SESSION_TTL = 3 * 3600
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "5"))
-MAX_UPLOAD_ROWS = int(os.getenv("MAX_UPLOAD_ROWS", "50000"))
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "0"))
+MAX_UPLOAD_ROWS = int(os.getenv("MAX_UPLOAD_ROWS", "0"))
 MAX_UPLOAD_COLUMNS = int(os.getenv("MAX_UPLOAD_COLUMNS", "60"))
 MAX_UPLOADS_PER_SESSION = int(os.getenv("MAX_UPLOADS_PER_SESSION", "3"))
-UPLOAD_PARSE_TIMEOUT_SECONDS = int(os.getenv("UPLOAD_PARSE_TIMEOUT_SECONDS", "15"))
+UPLOAD_PARSE_TIMEOUT_SECONDS = int(os.getenv("UPLOAD_PARSE_TIMEOUT_SECONDS", "0"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 sessions: dict[str, dict] = {}
 results: dict[str, dict] = {}
@@ -67,6 +68,7 @@ class UseUploadRequest(BaseModel):
     upload_id: str
     mapping: dict[str, str] = Field(default_factory=dict)
     time_standard: str | None = None
+    canonical_units_confirmed: bool = False
 
 
 class AnalysisRequest(BaseModel):
@@ -90,7 +92,7 @@ class ScopeRequest(BaseModel):
 
 
 class MultiValidateRequest(BaseModel):
-    locations: list[str] = Field(min_length=1, max_length=3)
+    locations: list[str] = Field(min_length=1, max_length=len(LOCATIONS))
     start_date: date
     end_date: date
     weather_variables: list[str] = Field(default_factory=lambda: WEATHER_COLUMNS.copy())
@@ -103,6 +105,8 @@ class MultiValidateRequest(BaseModel):
     nasa_mapping: dict[str, str] = Field(default_factory=dict)
     nasa_solar_unit: str | None = None
     nasa_temperature_unit: str | None = None
+    nasa_humidity_unit: str | None = None
+    nasa_wind_unit: str | None = None
     nasa_time_standard: str | None = None
 
 
@@ -112,7 +116,7 @@ class MultiMergeRequest(BaseModel):
 
 def mapped_nasa_upload(upload: pd.DataFrame, request: MultiValidateRequest) -> tuple[pd.DataFrame, dict]:
     """Treat user files as declared, unverified source data, never as an authenticated provider response."""
-    allowed = {"location_id", "date", "nasa_solar_radiation", "nasa_temperature_mean_c", "latitude", "longitude"}
+    allowed = {"location_id", "date", "nasa_solar_radiation", "nasa_temperature_mean_c", "nasa_relative_humidity_pct", "nasa_wind_speed_m_s", "latitude", "longitude"}
     mapping = request.nasa_mapping
     if set(mapping) - allowed or len(set(mapping.values())) != len(mapping.values()) or set(mapping.values()) - set(upload):
         raise ValueError("The uploaded NASA column mapping is invalid or ambiguous")
@@ -122,10 +126,13 @@ def mapped_nasa_upload(upload: pd.DataFrame, request: MultiValidateRequest) -> t
     frame["date"] = pd.to_datetime(frame["date"], errors="coerce", utc=True).dt.tz_localize(None)
     if frame.date.isna().any():
         raise ValueError("Uploaded secondary data contains invalid dates")
+    if frame.date.dt.normalize().ne(frame.date).any():
+        raise ValueError("Uploaded secondary data needs UTC daily dates without time-of-day values")
     frame["location_id"] = frame.location_id.astype(str).str.strip()
     frame = frame[frame.location_id.isin(request.locations) & frame.date.between(pd.Timestamp(request.start_date), pd.Timestamp(request.end_date))].copy()
     if frame.empty:
         raise ValueError("Uploaded secondary data has no selected location-date records")
+    validate_coordinates(frame, "NASA upload")
     trusted_metadata = upload.attrs.get("nasa_metadata", {})
     if trusted_metadata:
         if set(frame.location_id) - set(trusted_metadata):
@@ -136,6 +143,10 @@ def mapped_nasa_upload(upload: pd.DataFrame, request: MultiValidateRequest) -> t
             raise ValueError("Declare UTC daily time and the source-reported solar unit for uploaded tabular data")
         if "nasa_temperature_mean_c" in frame and frame.nasa_temperature_mean_c.notna().any() and request.nasa_temperature_unit not in {"C", "°C", "degC"}:
             raise ValueError("Declare a supported Celsius unit for uploaded comparison temperature")
+        if "nasa_relative_humidity_pct" in frame and frame.nasa_relative_humidity_pct.notna().any() and request.nasa_humidity_unit != "%":
+            raise ValueError("Declare percent units for uploaded NASA relative humidity")
+        if "nasa_wind_speed_m_s" in frame and frame.nasa_wind_speed_m_s.notna().any() and request.nasa_wind_unit != "m/s":
+            raise ValueError("Declare m/s units for uploaded NASA wind speed")
         metadata = {}
         for key, group in frame.groupby("location_id"):
             grid_lat = pd.to_numeric(group["latitude"], errors="coerce").dropna().iloc[0] if "latitude" in group and pd.to_numeric(group["latitude"], errors="coerce").notna().any() else None
@@ -143,6 +154,10 @@ def mapped_nasa_upload(upload: pd.DataFrame, request: MultiValidateRequest) -> t
             parameters = {"ALLSKY_SFC_SW_DWN": {"units": request.nasa_solar_unit}}
             if "nasa_temperature_mean_c" in frame and frame.nasa_temperature_mean_c.notna().any():
                 parameters["T2M"] = {"units": request.nasa_temperature_unit}
+            if "nasa_relative_humidity_pct" in frame and frame.nasa_relative_humidity_pct.notna().any():
+                parameters["RH2M"] = {"units": request.nasa_humidity_unit}
+            if "nasa_wind_speed_m_s" in frame and frame.nasa_wind_speed_m_s.notna().any():
+                parameters["WS10M"] = {"units": request.nasa_wind_unit}
             metadata[key] = {"provider": "Uploaded secondary climate data", "dataset_version": "uploaded-declared", "parameter_metadata": parameters, "grid_latitude": grid_lat, "grid_longitude": grid_lon, "time_standard": "UTC"}
     return frame[[col for col in ["location_id", "date", "nasa_solar_radiation", "nasa_temperature_mean_c", "nasa_relative_humidity_pct", "nasa_wind_speed_m_s"] if col in frame]], metadata
 
@@ -156,8 +171,20 @@ def health():
 def start_session():
     prune()
     token = secrets.token_urlsafe(32)
-    sessions[token] = {"expires": time.time() + SESSION_TTL, "uploads": {}, "weather": None, "primary_weather": None, "api_weather": None, "weather_source": None, "weather_filename": None, "retrieved_at": None, "requests": [], "multisource": None, "merged": None}
+    sessions[token] = {"expires": time.time() + SESSION_TTL, "uploads": {}, "weather": None, "primary_weather": None, "api_weather": None, "weather_source": None, "weather_filename": None, "weather_upload_id": None, "weather_units_confirmed": False, "retrieved_at": None, "requests": [], "multisource": None, "merged": None, "merge_quality": None}
     return {"session_id": token, "expires_in_seconds": SESSION_TTL}
+
+
+@app.get("/api/session")
+def session_status(auth=Depends(session)):
+    token, state = auth
+    uploads = []
+    for upload_id, frame in state["uploads"].items():
+        date_column = frame["date"] if "date" in frame else frame["time"] if "time" in frame else None
+        dates = pd.to_datetime(date_column, errors="coerce").dropna() if date_column is not None else pd.Series(dtype="datetime64[ns]")
+        uploads.append({"upload_id": upload_id, "filename": frame.attrs.get("filename"), "rows": len(frame), "columns": list(frame.columns), "preview": frame.head(50).fillna("").astype(str).to_dict("records"), "missing_by_column": {str(col): int(frame[col].isna().sum()) for col in frame.columns}, "required_weather": ["location_id", "date", "model"], "observation_period": [str(dates.min().date()), str(dates.max().date())] if len(dates) else None})
+    validated = state.get("multisource")
+    return {"session_id": token, "expires_in_seconds": SESSION_TTL, "uploads": uploads, "weather_upload_id": state.get("weather_upload_id"), "weather_units_confirmed": state.get("weather_units_confirmed", False), "upload_bounds": date_bounds(state["primary_weather"]) if state["primary_weather"] is not None else None, "api_bounds": date_bounds(state["api_weather"]) if state["api_weather"] is not None else None, "merged_bounds": date_bounds(state["merged"]) if state["merged"] is not None else None, "merge_quality": state.get("merge_quality"), "validation": {"validation_id": validated["validation_id"], "report": validated["report"], "selection": validated["selection"]} if validated else None}
 
 
 @app.delete("/api/session")
@@ -180,7 +207,7 @@ def catalog():
         "essential_variables": WEATHER_COLUMNS,
         "schema_version": SCHEMA_VERSION,
         "upload_limit_mb": MAX_UPLOAD_MB, "upload_limit_rows": MAX_UPLOAD_ROWS,
-        "upload_limit_columns": MAX_UPLOAD_COLUMNS, "uploads_per_session": MAX_UPLOADS_PER_SESSION,
+        "upload_limit_columns": MAX_UPLOAD_COLUMNS, "uploads_per_session": MAX_UPLOADS_PER_SESSION, "session_idle_seconds": SESSION_TTL,
     }
 
 
@@ -258,6 +285,26 @@ def dataset(request: ScopeRequest, auth=Depends(session)):
     return {**bounds, "available_locations": sorted(weather.location_id.unique().tolist()), "selected_observations": len(subset), "selected_valid_temperature": int(subset.temperature_mean_c.count()), "selected_valid_rainfall": int(subset.precipitation_mm.count()), "source": status, "variables": variables, "compatibility": chart_compatibility(weather), "schema_version": SCHEMA_VERSION, "retrieved_at": metadata.get("retrieved_at_utc"), "model": sorted(weather.model.unique().tolist())}
 
 
+@app.post("/api/periods")
+def period_summaries(request: ScopeRequest, frequency: str = Query(default="monthly", pattern="^(monthly|annual)$"), page: int = Query(default=1, ge=1), page_size: int = Query(default=100, ge=1, le=250), auth=Depends(session)):
+    """Page backend-aggregated monthly or annual observations by location."""
+    _, state = auth
+    try:
+        weather, _, _ = selected_weather(request.source, state)
+        selected = filter_weather(weather, request.locations, str(request.start_date) if request.start_date else None, str(request.end_date) if request.end_date else None)
+        table = period_table(selected, frequency)
+        solar = "nasa_solar_radiation_kwh_m2_day"
+        if solar in selected and selected[solar].notna().any():
+            keys = ["location_id", "year"] + (["month"] if frequency == "monthly" else [])
+            observations = selected.assign(year=selected.date.dt.year, month=selected.date.dt.month)
+            solar_table = observations.groupby(keys, as_index=False).agg(solar_mean_kwh_m2_day=(solar, "mean"), solar_valid_days=(solar, "count"))
+            table = table.merge(solar_table, on=keys, how="left", validate="one_to_one")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    offset = (page - 1) * page_size
+    return {"frequency": frequency, "page": page, "page_size": page_size, "total_rows": len(table), "columns": list(table.columns), "rows": json.loads(table.iloc[offset:offset + page_size].to_json(orient="records"))}
+
+
 @app.post("/api/summary")
 def summary(request: ScopeRequest, auth=Depends(session)):
     _, state = auth
@@ -327,6 +374,7 @@ async def fetch(request: FetchRequest, auth=Depends(session)):
     state["retrieved_at"] = datetime.now(timezone.utc).isoformat()
     state["multisource"] = None
     state["merged"] = None
+    state["merge_quality"] = None
     for key, value in list(results.items()):
         if value["session_id"] == token:
             del results[key]
@@ -347,6 +395,10 @@ async def multisource_validate(request: MultiValidateRequest, auth=Depends(sessi
         raise HTTPException(400, "Choose supported weather variables")
     if request.weather_source not in {"upload", "api"} or request.nasa_source not in {"upload", "api"}:
         raise HTTPException(400, "Choose an upload or API source")
+    if len(set(request.locations)) != len(request.locations) or set(request.locations) - set(LOCATIONS):
+        raise HTTPException(400, "Choose distinct registered locations")
+    if len(request.locations) > 3 and (request.weather_source == "api" or (request.include_nasa and request.nasa_source == "api")):
+        raise HTTPException(400, "Live API integration supports up to three locations; upload both CSV files for nationwide analysis")
     if not request.include_nasa and request.method == "compare":
         raise HTTPException(400, "Source comparison requires solar data")
     try:
@@ -367,7 +419,7 @@ async def multisource_validate(request: MultiValidateRequest, auth=Depends(sessi
         else:
             nasa_task = fetch_nasa(request.locations, request.start_date, request.end_date, request.nasa_variables)
         if request.weather_source == "upload":
-            weather_task = asyncio.sleep(0, result=(state["primary_weather"].copy(), [], 0))
+            weather_task = asyncio.sleep(0, result=(state["primary_weather"], [], 0))
         else:
             weather_task = fetch_weather(request.locations, request.start_date, request.end_date, request.weather_variables, "UTC")
         weather_result, nasa_result = await asyncio.gather(weather_task, nasa_task)
@@ -396,6 +448,10 @@ async def multisource_validate(request: MultiValidateRequest, auth=Depends(sessi
         report["secondary_filename"] = stored.attrs.get("filename") if stored is not None else None
         if request.weather_source == "upload" or (request.include_nasa and request.nasa_source == "upload"):
             report["warnings"].append("Uploaded values, units, and UTC time standard are user-supplied and are not authenticated against provider APIs.")
+        report["coordinate_validation"] = {"weather": "checked against registered locations" if {"latitude", "longitude"}.issubset(weather) else "not supplied", "nasa": "checked against registered locations" if stored is not None and {"latitude", "longitude"}.issubset(stored.rename(columns={source: target for target, source in request.nasa_mapping.items()})) else "provider grid or not supplied"}
+        report["weather_units"] = "user-declared canonical units" if request.weather_source == "upload" and state.get("weather_units_confirmed") else "legacy implicit canonical units" if request.weather_source == "upload" else "provider-reported units"
+        if request.weather_source == "upload" and not state.get("weather_units_confirmed"):
+            report["warnings"].append("Weather units were not explicitly confirmed; verify the CSV uses the named canonical units before interpretation.")
         report["provider_errors"] = weather_errors + nasa_errors
         report["cache_hits"] = {"openmeteo": weather_hits, "nasa": nasa_hits}
         report["unit_transformation"] = transform
@@ -419,6 +475,7 @@ def multisource_merge(request: MultiMergeRequest, auth=Depends(session)):
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     state["merged"] = merged
+    state["merge_quality"] = quality
     state["weather"] = merged
     state["weather_source"] = " + ".join(validated["report"]["providers"])
     state["retrieved_at"] = validated["retrieved_at"]
@@ -444,18 +501,34 @@ def multisource_report_csv(auth=Depends(session)):
     return Response(pd.DataFrame(rows).to_csv(index=False), media_type="text/csv", headers={"Content-Disposition": 'attachment; filename="merge-quality-report.csv"'})
 
 
-def parse_upload(name: str, content: bytes) -> pd.DataFrame:
+@app.get("/api/multisource/unmatched-nasa.csv")
+def unmatched_nasa_csv(auth=Depends(session)):
+    _, state = auth
+    validated = state.get("multisource")
+    if not validated or validated["secondary"] is None:
+        raise HTTPException(404, "No validated NASA dataset in this session")
+    primary_keys = validated["primary"][["location_id", "date"]]
+    secondary = validated["secondary"]
+    unmatched = secondary.merge(primary_keys, on=["location_id", "date"], how="left", validate="one_to_one", indicator=True)
+    unmatched = unmatched[unmatched._merge.eq("left_only")].drop(columns="_merge")
+    return Response(unmatched.to_csv(index=False), media_type="text/csv", headers={"Content-Disposition": 'attachment; filename="unmatched-nasa-records.csv"'})
+
+
+def parse_upload(name: str, content: BinaryIO | bytes) -> pd.DataFrame:
+    stream = io.BytesIO(content) if isinstance(content, bytes) else content
+    stream.seek(0)
     suffix = Path(name).suffix.lower()
     if suffix == ".csv":
-        return pd.read_csv(io.BytesIO(content), nrows=MAX_UPLOAD_ROWS + 1)
+        return pd.read_csv(stream, nrows=MAX_UPLOAD_ROWS + 1 if MAX_UPLOAD_ROWS > 0 else None)
     if suffix == ".parquet":
         import pyarrow.parquet as pq
-        metadata = pq.ParquetFile(io.BytesIO(content)).metadata
-        if metadata.num_rows > MAX_UPLOAD_ROWS or metadata.num_columns > MAX_UPLOAD_COLUMNS:
+        metadata = pq.ParquetFile(stream).metadata
+        if (MAX_UPLOAD_ROWS > 0 and metadata.num_rows > MAX_UPLOAD_ROWS) or metadata.num_columns > MAX_UPLOAD_COLUMNS:
             raise ValueError("Parquet file exceeds row or column limits")
-        return pd.read_parquet(io.BytesIO(content))
+        stream.seek(0)
+        return pd.read_parquet(stream)
     if suffix == ".json":
-        payload = json.loads(content)
+        payload = json.load(stream)
         if isinstance(payload, dict) and isinstance(payload.get("properties"), dict) and isinstance(payload.get("parameters"), dict):
             coordinates = payload.get("geometry", {}).get("coordinates", [])
             if not isinstance(coordinates, list) or len(coordinates) < 2:
@@ -515,25 +588,62 @@ async def upload_preview(file: UploadFile = File(...), auth=Depends(session)):
     name = Path(file.filename or "upload").name
     if Path(name).suffix.lower() not in {".csv", ".parquet", ".json"}:
         raise HTTPException(400, "Unsupported file type")
-    content = await file.read(MAX_UPLOAD_BYTES + 1)
-    if len(content) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, f"Upload exceeds {MAX_UPLOAD_MB} MB")
+    if MAX_UPLOAD_BYTES > 0:
+        upload_size = file.size
+        if upload_size is None:
+            file.file.seek(0, io.SEEK_END)
+            upload_size = file.file.tell()
+            file.file.seek(0)
+        if upload_size > MAX_UPLOAD_BYTES:
+            raise HTTPException(413, f"Upload exceeds {MAX_UPLOAD_MB} MB")
     try:
-        df = await asyncio.wait_for(asyncio.to_thread(parse_upload, name, content), timeout=UPLOAD_PARSE_TIMEOUT_SECONDS)
+        parse = asyncio.to_thread(parse_upload, name, file.file)
+        df = await asyncio.wait_for(parse, timeout=UPLOAD_PARSE_TIMEOUT_SECONDS) if UPLOAD_PARSE_TIMEOUT_SECONDS > 0 else await parse
     except TimeoutError as exc:
-        raise HTTPException(408, "File parsing took too long") from exc
+        raise HTTPException(408, f"File parsing exceeded {UPLOAD_PARSE_TIMEOUT_SECONDS} seconds; reduce the file size or increase UPLOAD_PARSE_TIMEOUT_SECONDS") from exc
+    except MemoryError as exc:
+        raise HTTPException(413, "Server memory is insufficient for this upload; reduce the file size") from exc
     except Exception as exc:
-        raise HTTPException(400, f"Could not parse file: {type(exc).__name__}") from exc
-    if df.empty or len(df) > MAX_UPLOAD_ROWS or len(df.columns) > MAX_UPLOAD_COLUMNS:
-        raise HTTPException(400, f"Upload must have 1–{MAX_UPLOAD_ROWS:,} rows and at most {MAX_UPLOAD_COLUMNS} columns")
+        raise HTTPException(400, f"Could not parse file: {type(exc).__name__}: {str(exc)[:160]}") from exc
+    if df.empty or (MAX_UPLOAD_ROWS > 0 and len(df) > MAX_UPLOAD_ROWS) or len(df.columns) > MAX_UPLOAD_COLUMNS:
+        row_rule = f"1–{MAX_UPLOAD_ROWS:,}" if MAX_UPLOAD_ROWS > 0 else "at least 1"
+        raise HTTPException(400, f"Upload must have {row_rule} rows and at most {MAX_UPLOAD_COLUMNS} columns")
     upload_id = secrets.token_urlsafe(16)
     df.attrs["filename"] = name
     state["uploads"][upload_id] = df
-    preview = df.head(8).fillna("").astype(str).to_dict("records")
+    preview = df.head(50).fillna("").astype(str).to_dict("records")
     date_column = df["date"] if "date" in df else df["time"] if "time" in df else None
     dates = pd.to_datetime(date_column, errors="coerce").dropna() if date_column is not None else pd.Series(dtype="datetime64[ns]")
     detected_nasa = next(iter(df.attrs.get("nasa_metadata", {}).values()), None)
-    return {"upload_id": upload_id, "filename": name, "rows": len(df), "columns": list(df.columns), "preview": preview, "missing_by_column": {str(col): int(df[col].isna().sum()) for col in df.columns}, "required_weather": ["location_id", "date", "model"], "observation_period": [str(dates.min().date()), str(dates.max().date())] if len(dates) else None, "detected_nasa": {"solar_unit": detected_nasa["parameter_metadata"]["ALLSKY_SFC_SW_DWN"]["units"], "temperature_unit": detected_nasa["parameter_metadata"].get("T2M", {}).get("units"), "time_standard": detected_nasa["time_standard"], "location_id": detected_nasa["requested_location_id"]} if detected_nasa else None}
+    return {"upload_id": upload_id, "filename": name, "rows": len(df), "columns": list(df.columns), "preview": preview, "missing_by_column": {str(col): int(df[col].isna().sum()) for col in df.columns}, "required_weather": ["location_id", "date", "model"], "observation_period": [str(dates.min().date()), str(dates.max().date())] if len(dates) else None, "detected_nasa": {"solar_unit": detected_nasa["parameter_metadata"]["ALLSKY_SFC_SW_DWN"]["units"], "temperature_unit": detected_nasa["parameter_metadata"].get("T2M", {}).get("units"), "humidity_unit": detected_nasa["parameter_metadata"].get("RH2M", {}).get("units"), "wind_unit": detected_nasa["parameter_metadata"].get("WS10M", {}).get("units"), "time_standard": detected_nasa["time_standard"], "location_id": detected_nasa["requested_location_id"]} if detected_nasa else None}
+
+
+@app.get("/api/upload/{upload_id}/rows")
+def upload_rows(upload_id: str, page: int = Query(default=1, ge=1), page_size: int = Query(default=50, ge=1, le=100), auth=Depends(session)):
+    _, state = auth
+    frame = state["uploads"].get(upload_id)
+    if frame is None:
+        raise HTTPException(404, "Upload not found in this session")
+    offset = (page - 1) * page_size
+    preview = frame.iloc[offset:offset + page_size].fillna("").astype(str).to_dict("records")
+    return {"page": page, "page_size": page_size, "total_rows": len(frame), "columns": list(frame.columns), "rows": preview}
+
+
+@app.get("/api/session/backup")
+def session_backup(auth=Depends(session)):
+    """Optional user-managed durable backup of uploaded source files."""
+    _, state = auth
+    if not state["uploads"]:
+        raise HTTPException(404, "No uploaded datasets in this session")
+    output = io.BytesIO()
+    manifest = {"created_at_utc": datetime.now(timezone.utc).isoformat(), "schema_version": SCHEMA_VERSION, "files": []}
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for index, frame in enumerate(state["uploads"].values(), 1):
+            name = f"uploaded-source-{index}.csv"
+            archive.writestr(name, frame.to_csv(index=False))
+            manifest["files"].append({"backup_name": name, "original_filename": frame.attrs.get("filename"), "rows": len(frame)})
+        archive.writestr("manifest.json", json.dumps(manifest, indent=2))
+    return Response(output.getvalue(), media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="bayanviz-session-backup.zip"'})
 
 
 @app.post("/api/upload/use")
@@ -552,18 +662,28 @@ def use_upload(request: UseUploadRequest, auth=Depends(session)):
         raise HTTPException(400, "Declare UTC daily dates for the uploaded weather dataset")
     if mapped.columns.duplicated().any():
         raise HTTPException(400, "Mapped weather columns must be distinct")
-    if {"location_id", "date"}.issubset(mapped):
-        keys = mapped[["location_id", "date"]].copy()
-        keys["date"] = pd.to_datetime(keys["date"], errors="coerce")
-        if keys["date"].isna().any() or keys["location_id"].isna().any():
-            raise HTTPException(400, "Weather upload contains invalid dates or locations")
-        if keys.duplicated(["location_id", "date"]).any():
-            raise HTTPException(400, "Weather upload has duplicate location-date keys")
+    if not {"location_id", "date", "model"}.issubset(mapped):
+        raise HTTPException(400, "Weather upload needs location_id, date, and model columns")
+    keys = mapped[["location_id", "date", "model"]].copy()
+    keys["date"] = pd.to_datetime(keys["date"], errors="coerce", utc=True)
+    if keys["date"].isna().any() or keys["location_id"].isna().any() or keys["model"].isna().any() or keys.location_id.astype(str).str.strip().eq("").any() or keys.model.astype(str).str.strip().eq("").any():
+        raise HTTPException(400, "Weather upload contains missing or invalid dates, locations, or model values")
+    if keys.date.dt.normalize().ne(keys.date).any():
+        raise HTTPException(400, "Weather upload needs UTC daily dates without time-of-day values")
+    keys["location_id"] = keys.location_id.astype(str).str.strip()
+    if keys.duplicated(["location_id", "date"]).any():
+        raise HTTPException(400, "Weather upload has duplicate location-date keys")
+    mapped = mapped.copy()
+    mapped["date"] = keys.date.dt.tz_localize(None)
+    retained = {"location_id", "date", "model", "latitude", "longitude", "openmeteo_grid_latitude", "openmeteo_grid_longitude", *CLIMATE_COLUMNS}
+    mapped = mapped[[column for column in mapped if column in retained]]
     try:
         cleaned = prepare_weather(mapped)
     except (ValueError, KeyError) as exc:
         raise HTTPException(400, str(exc)) from exc
     count = len(cleaned)
+    if count != len(mapped):
+        raise HTTPException(400, "Weather validation changed the row count; correct missing keys or duplicate records")
     if not count:
         raise HTTPException(400, "No valid records remained after validation")
     if not any(cleaned[name].notna().any() for name in WEATHER_COLUMNS):
@@ -571,18 +691,25 @@ def use_upload(request: UseUploadRequest, auth=Depends(session)):
     unknown = set(cleaned.location_id) - set(LOCATIONS)
     if unknown:
         raise HTTPException(400, "Unknown location_id values: " + ", ".join(sorted(unknown)))
+    try:
+        coordinates_present = validate_coordinates(cleaned, "Weather upload")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     cleaned["analysis_time_standard"] = "UTC"
     state["multisource"] = None
     state["merged"] = None
+    state["merge_quality"] = None
     for key, value in list(results.items()):
         if value["session_id"] == token:
             del results[key]
     state["weather"] = cleaned
-    state["primary_weather"] = cleaned.copy()
+    state["primary_weather"] = cleaned
     state["weather_filename"] = df.attrs.get("filename")
+    state["weather_upload_id"] = request.upload_id
+    state["weather_units_confirmed"] = request.canonical_units_confirmed
     state["weather_source"] = f"Uploaded Dataset ({state['weather_filename']})"
     state["retrieved_at"] = datetime.now(timezone.utc).isoformat()
-    return {"status": "Uploaded Dataset", "valid_records": count, "observation_period": [str(cleaned.date.min().date()), str(cleaned.date.max().date())], "locations": sorted(cleaned.location_id.unique().tolist()), "variables": [name for name in CLIMATE_COLUMNS if cleaned[name].notna().any()], "schema_version": SCHEMA_VERSION}
+    return {"status": "Uploaded Dataset", "valid_records": count, "observation_period": [str(cleaned.date.min().date()), str(cleaned.date.max().date())], "locations": sorted(cleaned.location_id.unique().tolist()), "variables": [name for name in CLIMATE_COLUMNS if cleaned[name].notna().any()], "schema_version": SCHEMA_VERSION, "coordinates_validated": coordinates_present, "canonical_units_confirmed": request.canonical_units_confirmed}
 
 
 @app.post("/api/analysis")

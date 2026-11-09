@@ -109,7 +109,9 @@ def validate_sources(primary: pd.DataFrame, secondary: pd.DataFrame | None, meta
     if not common:
         raise ValueError("The providers have no overlapping location-date observations")
     overlap_dates = sorted(date for _, date in common)
-    report.update({"nasa_rows": len(secondary), "nasa_coverage": [str(secondary.date.min().date()), str(secondary.date.max().date())], "nasa_variables": [col for col in NASA_COLUMNS if col in secondary and secondary[col].notna().any()], "nasa_missing_values": {col: int(secondary[col].isna().sum()) for col in NASA_COLUMNS if col in secondary}, "matched_dates": len(common), "unmatched_primary_dates": len(primary_keys - secondary_keys), "unmatched_nasa_dates": len(secondary_keys - primary_keys), "common_date_range": [str(overlap_dates[0].date()), str(overlap_dates[-1].date())]})
+    unmatched_primary = primary_keys - secondary_keys
+    unmatched_nasa = secondary_keys - primary_keys
+    report.update({"nasa_rows": len(secondary), "nasa_coverage": [str(secondary.date.min().date()), str(secondary.date.max().date())], "nasa_variables": [col for col in NASA_COLUMNS if col in secondary and secondary[col].notna().any()], "nasa_missing_values": {col: int(secondary[col].isna().sum()) for col in NASA_COLUMNS if col in secondary}, "matched_dates": len(common), "unmatched_primary_dates": len(unmatched_primary), "unmatched_nasa_dates": len(unmatched_nasa), "unmatched_nasa_examples": [{"location_id": loc, "date": str(day.date())} for loc, day in sorted(unmatched_nasa)[:10]], "common_date_range": [str(overlap_dates[0].date()), str(overlap_dates[-1].date())]})
     if report["unmatched_primary_dates"] or report["unmatched_nasa_dates"]:
         report["status"] = "Partially Matched"
     if not secondary.nasa_solar_radiation_kwh_m2_day.notna().any():
@@ -133,7 +135,7 @@ def merge_sources(primary: pd.DataFrame, secondary: pd.DataFrame | None, report:
         matched = int(merged._merge.eq("both").sum())
         merged = merged.drop(columns="_merge")
     paired = int(merged.nasa_solar_radiation_kwh_m2_day.notna().sum())
-    quality = {"primary_rows": len(primary), "nasa_rows": 0 if secondary is None else len(secondary), "matched_rows": matched, "unmatched_rows": len(primary) - matched, "paired_solar_rows": paired, "paired_coverage_pct": round(100 * paired / len(primary), 1), "paired_coverage_formula": "100 × primary rows with valid NASA solar radiation / all primary rows", "common_date_range": report["common_date_range"], "status": report["status"]}
+    quality = {"primary_rows": len(primary), "nasa_rows": 0 if secondary is None else len(secondary), "matched_rows": matched, "unmatched_rows": len(primary) - matched, "unmatched_nasa_rows": report.get("unmatched_nasa_dates", 0), "paired_solar_rows": paired, "paired_coverage_pct": round(100 * paired / len(primary), 1), "paired_coverage_formula": "100 × primary rows with valid NASA solar radiation / all primary rows", "common_date_range": report["common_date_range"], "status": report["status"]}
     return merged, quality
 
 
