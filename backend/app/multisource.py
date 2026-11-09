@@ -18,8 +18,11 @@ from .catalog import LOCATIONS
 from .charts import RENDER_LOCK
 from .processing import WEATHER_COLUMNS, safe_number
 
-NASA_COLUMNS = ["nasa_solar_radiation_kwh_m2_day", "nasa_temperature_mean_c"]
+NASA_COLUMNS = ["nasa_solar_radiation_kwh_m2_day", "nasa_temperature_mean_c", "nasa_relative_humidity_pct", "nasa_wind_speed_m_s"]
 MS_CHARTS = {
+    "annual_solar": ("Annual solar radiation trend", "sns.lineplot()", "Compare annual mean daily solar radiation and matched observation counts"),
+    "cloud_solar": ("Cloud cover vs solar radiation", "sns.scatterplot()", "Compare paired UTC daily cloud cover and NASA solar radiation"),
+    "humidity_compare": ("Humidity source comparison", "sns.scatterplot()", "Compare paired daily relative-humidity estimates from Open-Meteo and NASA POWER"),
     "temp_solar": ("Temperature vs solar radiation", "sns.scatterplot()", "Compare paired daily temperature and solar radiation"),
     "rain_solar": ("Rainfall vs solar radiation", "sns.scatterplot()", "Compare paired rainfall and solar radiation; bubble size is mean temperature"),
     "temp_compare": ("Temperature source comparison", "sns.lineplot()", "Inspect agreement between two modeled daily temperature estimates"),
@@ -40,12 +43,16 @@ def normalize_nasa(frame: pd.DataFrame, metadata: dict) -> tuple[pd.DataFrame, d
         raise ValueError("NASA data contains invalid dates")
     if df.duplicated(["location_id", "date"]).any():
         raise ValueError("NASA data has duplicate location-date keys")
-    for col in ("nasa_solar_radiation", "nasa_temperature_mean_c"):
+    for col in ("nasa_solar_radiation", "nasa_temperature_mean_c", "nasa_relative_humidity_pct", "nasa_wind_speed_m_s"):
         if col not in df:
             df[col] = np.nan
         df[col] = pd.to_numeric(df[col], errors="coerce").replace([np.inf, -np.inf, -999, -9999], np.nan)
     if df.nasa_solar_radiation.lt(0).any():
         raise ValueError("NASA solar radiation contains negative non-missing values")
+    if df.nasa_relative_humidity_pct.dropna().lt(0).any() or df.nasa_relative_humidity_pct.dropna().gt(100).any():
+        raise ValueError("NASA relative humidity must be between 0 and 100 percent")
+    if df.nasa_wind_speed_m_s.dropna().lt(0).any():
+        raise ValueError("NASA wind speed must be nonnegative")
     units = {m.get("parameter_metadata", {}).get("ALLSKY_SFC_SW_DWN", {}).get("units") for m in metadata.values()}
     if len(units) != 1:
         raise ValueError("NASA solar units differ between selected locations")
@@ -60,6 +67,12 @@ def normalize_nasa(frame: pd.DataFrame, metadata: dict) -> tuple[pd.DataFrame, d
     temp_units = {m.get("parameter_metadata", {}).get("T2M", {}).get("units") for m in metadata.values() if "T2M" in m.get("parameter_metadata", {})}
     if temp_units and temp_units not in ({"C"}, {"°C"}, {"degC"}):
         raise ValueError(f"Unsupported NASA temperature unit: {', '.join(map(str, temp_units))}")
+    humidity_units = {m.get("parameter_metadata", {}).get("RH2M", {}).get("units") for m in metadata.values() if "RH2M" in m.get("parameter_metadata", {})}
+    if humidity_units and humidity_units != {"%"}:
+        raise ValueError("Unsupported NASA relative humidity unit")
+    wind_units = {m.get("parameter_metadata", {}).get("WS10M", {}).get("units") for m in metadata.values() if "WS10M" in m.get("parameter_metadata", {})}
+    if wind_units and wind_units != {"m/s"}:
+        raise ValueError("Unsupported NASA wind speed unit")
     df["nasa_solar_radiation_kwh_m2_day"] = df.nasa_solar_radiation * factor
     return df.sort_values(["location_id", "date"]).reset_index(drop=True), {"original_solar_unit": raw_unit, "canonical_solar_unit": "kWh/m²/day", "conversion_factor": factor, "original_values_column": "nasa_solar_radiation"}
 
@@ -143,6 +156,20 @@ def prepare_multisource_chart(chart_id: str, frame: pd.DataFrame) -> tuple[pd.Da
         table = paired_table(frame, "temperature_mean_c", solar)
         units = "°C / kWh/m²/day"
         facts = {"paired_observations": len(table), "pearson_r": pearson(table, "temperature_mean_c", solar), "mean_temperature_c": safe_number(table.temperature_mean_c.mean()), "mean_solar_kwh_m2_day": safe_number(table[solar].mean())}
+    elif chart_id == "cloud_solar":
+        if "cloud_cover_mean_pct" not in frame or frame.cloud_cover_mean_pct.notna().sum() == 0:
+            raise ValueError("Daily cloud cover is absent from the weather dataset")
+        table = paired_table(frame, "cloud_cover_mean_pct", solar)
+        units = "% / kWh/m²/day"
+        facts = {"paired_observations": len(table), "pearson_r": pearson(table, "cloud_cover_mean_pct", solar)}
+    elif chart_id == "humidity_compare":
+        if "relative_humidity_mean_pct" not in frame or "nasa_relative_humidity_pct" not in frame:
+            raise ValueError("Both Open-Meteo and NASA relative humidity fields are required")
+        table = paired_table(frame, "relative_humidity_mean_pct", "nasa_relative_humidity_pct")
+        table["difference_pct_points"] = table.relative_humidity_mean_pct - table.nasa_relative_humidity_pct
+        units = "percentage points"
+        facts = {"paired_observations": len(table), "pearson_r": pearson(table, "relative_humidity_mean_pct", "nasa_relative_humidity_pct"), "mean_difference_pct_points": safe_number(table.difference_pct_points.mean())}
+        caveats.append("The two providers use different model grids; neither is a station reference.")
     elif chart_id == "rain_solar":
         table = paired_table(frame, "precipitation_mm", solar, "temperature_mean_c")
         units = "mm / kWh/m²/day / °C"
@@ -157,6 +184,15 @@ def prepare_multisource_chart(chart_id: str, frame: pd.DataFrame) -> tuple[pd.Da
         table["month"] = table.date.dt.month
         units = "kWh/m²/day"
         facts = {"paired_observations": len(table), "mean_solar_kwh_m2_day": safe_number(table[solar].mean()), "solar_std_kwh_m2_day": safe_number(table[solar].std())}
+    elif chart_id == "annual_solar":
+        paired = paired_table(frame, solar)
+        paired["year"] = paired.date.dt.year
+        table = paired.groupby(["location_id", "year"], as_index=False).agg(mean_daily_solar_kwh_m2=(solar, "mean"), valid_days=(solar, "count"))
+        table["expected_days"] = table.year.map(lambda year: 366 if pd.Timestamp(int(year), 12, 31).is_leap_year else 365)
+        table["coverage_pct"] = (100 * table.valid_days / table.expected_days).round(1)
+        units = "kWh/m²/day"
+        facts = {"paired_observations": len(paired), "years": len(table), "coverage_policy": "Annual means use only valid matched daily solar values; partial years show valid and expected days"}
+        caveats.append("An annual mean of daily solar radiation is shown; daily-average values are never summed.")
     elif chart_id == "multi_correlation":
         columns = ["temperature_mean_c", "precipitation_mm", "wind_speed_max_kmh", solar]
         table = paired_table(frame, *columns)
@@ -184,6 +220,31 @@ def build_temp_solar(table: pd.DataFrame):
     fig, ax = plt.subplots(figsize=(8.4, 4.6))
     sns.scatterplot(data=table, x="nasa_solar_radiation_kwh_m2_day", y="temperature_mean_c", hue="location_id", ax=ax)
     ax.set(xlabel="Uploaded solar radiation (kWh/m²/day)", ylabel="Uploaded weather mean temperature (°C)", title="Temperature and solar radiation at paired dates")
+    fig.tight_layout()
+    return fig
+
+
+def build_annual_solar(table: pd.DataFrame):
+    fig, ax = plt.subplots(figsize=(9, 5))
+    sns.lineplot(data=table, x="year", y="mean_daily_solar_kwh_m2", hue="location_id", marker="o", estimator=None, ax=ax)
+    ax.set(title="Annual mean daily solar radiation", xlabel="Calendar year", ylabel="Mean daily solar radiation (kWh/m²/day)")
+    fig.tight_layout()
+    return fig
+
+
+def build_cloud_solar(table: pd.DataFrame):
+    fig, ax = plt.subplots(figsize=(8, 5))
+    sns.scatterplot(data=table, x="cloud_cover_mean_pct", y="nasa_solar_radiation_kwh_m2_day", hue="location_id", alpha=.5, ax=ax)
+    ax.set(title="Paired UTC daily cloud cover and solar radiation", xlabel="Open-Meteo mean cloud cover (%)", ylabel="NASA solar radiation (kWh/m²/day)")
+    fig.tight_layout()
+    return fig
+
+
+def build_humidity_compare(table: pd.DataFrame):
+    fig, ax = plt.subplots(figsize=(8, 5))
+    sns.scatterplot(data=table, x="nasa_relative_humidity_pct", y="relative_humidity_mean_pct", hue="location_id", alpha=.5, ax=ax)
+    ax.plot([0, 100], [0, 100], color="#9aadb8", linestyle="--", label="1:1")
+    ax.set(title="Paired daily relative humidity estimates", xlabel="NASA POWER humidity (%)", ylabel="Open-Meteo humidity (%)")
     fig.tight_layout()
     return fig
 
@@ -261,7 +322,7 @@ def build_solar_map(table: pd.DataFrame):
     return map_obj.get_root().render()
 
 
-MS_BUILDERS = {"temp_solar": build_temp_solar, "rain_solar": build_rain_solar, "temp_compare": build_temp_compare, "solar_seasonal": build_solar_seasonal, "multi_correlation": build_multi_correlation, "solar_map": build_solar_map}
+MS_BUILDERS = {"annual_solar": build_annual_solar, "cloud_solar": build_cloud_solar, "humidity_compare": build_humidity_compare, "temp_solar": build_temp_solar, "rain_solar": build_rain_solar, "temp_compare": build_temp_compare, "solar_seasonal": build_solar_seasonal, "multi_correlation": build_multi_correlation, "solar_map": build_solar_map}
 
 
 def render_multisource_chart(chart_id: str, table: pd.DataFrame) -> dict:
@@ -283,7 +344,9 @@ def multisource_code(chart_id: str) -> dict:
 
 def multisource_interpretation(chart_id: str, table: pd.DataFrame, facts: dict, caveats: list[str]) -> dict:
     count = facts["paired_observations"]
-    if chart_id == "temp_compare":
+    if chart_id == "humidity_compare":
+        finding = f"Across {count} paired daily observations, Open-Meteo minus NASA mean relative humidity differs by {facts['mean_difference_pct_points']} percentage points; Pearson r = {facts['pearson_r']:.3f}." if facts["pearson_r"] is not None else f"Across {count} paired daily observations, mean difference is {facts['mean_difference_pct_points']} percentage points; correlation is unavailable."
+    elif chart_id == "temp_compare":
         finding = f"Across {count} paired daily values, Weather minus solar-source temperature mean difference is {facts['mean_difference_c']} °C; MAE {facts['mean_absolute_error_c']} °C and RMSE {facts['root_mean_squared_error_c']} °C. Neither model is ground truth."
     elif "pearson_r" in facts:
         r = facts["pearson_r"]
@@ -292,6 +355,8 @@ def multisource_interpretation(chart_id: str, table: pd.DataFrame, facts: dict, 
         finding = f"Correlation coefficients use {count} complete location-date rows; each cell has the same denominator."
     elif chart_id == "solar_map":
         finding = f"{facts['mapped_locations']} uploaded locations contain {count} valid paired solar observations."
+    elif chart_id == "annual_solar":
+        finding = f"{facts['years']} location-year means use {count} valid matched daily solar values. Valid and expected days appear in the evidence table."
     else:
         finding = f"The selected dates contain {count} valid daily solar measurements; mean {facts['mean_solar_kwh_m2_day']} kWh/m²/day."
     return {"label": "Statistical Interpretation", "shows": MS_CHARTS[chart_id][2], "findings": finding, "evidence": f"The evidence table contains {len(table)} chart-input rows; the first 30 are shown and the complete table is downloadable.", "relevance": "Use these point comparisons for climate education and further investigation, not causal attribution or province-wide averages.", "limitations": caveats}

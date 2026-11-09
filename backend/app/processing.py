@@ -8,6 +8,9 @@ import numpy as np
 import pandas as pd
 
 WEATHER_COLUMNS = ["temperature_mean_c", "temperature_min_c", "temperature_max_c", "precipitation_mm", "wind_speed_max_kmh"]
+ADVANCED_COLUMNS = ["relative_humidity_mean_pct", "apparent_temperature_mean_c", "cloud_cover_mean_pct", "sunshine_duration_hours", "wind_gust_max_kmh", "precipitation_hours", "wind_direction_dominant_deg", "dew_point_mean_c", "shortwave_radiation_mj_m2"]
+CLIMATE_COLUMNS = WEATHER_COLUMNS + ADVANCED_COLUMNS
+SCHEMA_VERSION = "climate-daily-v2"
 RAINY_DAY_MM = 1.0
 MIN_PERIOD_COVERAGE = 0.9
 
@@ -19,7 +22,7 @@ def prepare_weather(frame: pd.DataFrame) -> pd.DataFrame:
     if not required.issubset(df):
         raise ValueError(f"Weather data needs {', '.join(sorted(required))}")
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    for col in WEATHER_COLUMNS:
+    for col in CLIMATE_COLUMNS:
         if col not in df:
             df[col] = np.nan
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -27,6 +30,18 @@ def prepare_weather(frame: pd.DataFrame) -> pd.DataFrame:
     df["location_id"] = df.location_id.astype(str).str.strip()
     df = df[df.location_id.ne("")]
     df = df.drop_duplicates(["location_id", "date", "model"], keep="last")
+    if df.groupby("location_id").model.nunique().gt(1).any():
+        raise ValueError("A location contains multiple weather models; select one consistent model before analysis")
+    invalid_range = df.temperature_max_c.notna() & df.temperature_min_c.notna() & df.temperature_max_c.lt(df.temperature_min_c)
+    if invalid_range.any():
+        raise ValueError(f"{int(invalid_range.sum())} rows have maximum temperature below minimum temperature")
+    for column in ("relative_humidity_mean_pct", "cloud_cover_mean_pct"):
+        if df[column].dropna().lt(0).any() or df[column].dropna().gt(100).any():
+            raise ValueError(f"{column} must be between 0 and 100 percent")
+    if df.sunshine_duration_hours.dropna().gt(24).any() or df.sunshine_duration_hours.dropna().lt(0).any():
+        raise ValueError("Sunshine duration must be between 0 and 24 hours")
+    if df.precipitation_hours.dropna().gt(24).any() or df.precipitation_hours.dropna().lt(0).any():
+        raise ValueError("Precipitation duration must be between 0 and 24 hours")
     df["outlier_flag"] = (df.temperature_mean_c.lt(-15) | df.temperature_mean_c.gt(50) | df.precipitation_mm.lt(0) | df.precipitation_mm.gt(1000))
     return df.sort_values(["location_id", "date", "model"]).reset_index(drop=True)
 
@@ -110,6 +125,48 @@ def correlation_table(weather: pd.DataFrame, x: str, y: str, aggregation: str = 
 
 def safe_number(value) -> float | None:
     return round(float(value), 2) if value is not None and pd.notna(value) and np.isfinite(value) else None
+
+
+def daily_temperature_range(weather: pd.DataFrame) -> pd.Series:
+    """Daily maximum minus minimum, retaining missing observations."""
+    result = weather.temperature_max_c - weather.temperature_min_c
+    if result.dropna().lt(0).any():
+        raise ValueError("Maximum temperature below minimum temperature requires data review")
+    return result
+
+
+def threshold_days(weather: pd.DataFrame, column: str, threshold: float) -> pd.DataFrame:
+    """Observed threshold counts and denominators by location and calendar year."""
+    if column not in {"temperature_max_c", "wind_speed_max_kmh"} or not np.isfinite(threshold):
+        raise ValueError("Choose a valid extreme-day measure and finite threshold")
+    frame = weather[["location_id", "date", column]].copy()
+    frame["year"] = frame.date.dt.year
+    frame["hit"] = frame[column].ge(threshold) & frame[column].notna()
+    return frame.groupby(["location_id", "year"], as_index=False).agg(
+        days_above_threshold=("hit", "sum"), valid_days=(column, "count"),
+        observed_days=("date", "nunique"))
+
+
+def observation_coverage(weather: pd.DataFrame, columns: list[str], period: str = "monthly") -> pd.DataFrame:
+    """Coverage against calendar days, with absent variables explicitly identified."""
+    if period not in {"monthly", "annual"}:
+        raise ValueError("Choose monthly or annual coverage")
+    frame = weather.copy()
+    frame["year"] = frame.date.dt.year
+    frame["month"] = frame.date.dt.month
+    keys = ["location_id", "year"] + (["month"] if period == "monthly" else [])
+    rows = []
+    for group_key, group in frame.groupby(keys):
+        location, year, *month = group_key
+        expected = calendar.monthrange(int(year), int(month[0]))[1] if month else (366 if calendar.isleap(int(year)) else 365)
+        for column in columns:
+            available = column in weather and weather[column].notna().any()
+            count = int(group[column].count()) if column in group else 0
+            rows.append({"location_id": location, "year": int(year), "month": int(month[0]) if month else None,
+                         "variable": column, "valid_days": count, "expected_days": expected,
+                         "coverage_pct": round(100 * count / expected, 1) if available else np.nan,
+                         "field_status": "available" if available else "absent"})
+    return pd.DataFrame(rows)
 
 
 def climate_summary(weather: pd.DataFrame, start: str, end: str, manifest: dict, source: str, reference: pd.DataFrame | None = None) -> dict:

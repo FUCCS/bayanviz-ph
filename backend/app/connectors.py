@@ -12,8 +12,10 @@ from .catalog import LOCATIONS
 
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 NASA_URL = "https://power.larc.nasa.gov/api/temporal/daily/point"
-VARIABLES = {"temperature_mean_c": "temperature_2m_mean", "temperature_min_c": "temperature_2m_min", "temperature_max_c": "temperature_2m_max", "precipitation_mm": "precipitation_sum", "wind_speed_max_kmh": "wind_speed_10m_max"}
-NASA_VARIABLES = {"solar_radiation": "ALLSKY_SFC_SW_DWN", "nasa_temperature_mean_c": "T2M"}
+VARIABLES = {"temperature_mean_c": "temperature_2m_mean", "temperature_min_c": "temperature_2m_min", "temperature_max_c": "temperature_2m_max", "precipitation_mm": "precipitation_sum", "wind_speed_max_kmh": "wind_speed_10m_max", "sunshine_duration_hours": "sunshine_duration", "wind_gust_max_kmh": "wind_gusts_10m_max", "precipitation_hours": "precipitation_hours", "wind_direction_dominant_deg": "wind_direction_10m_dominant", "shortwave_radiation_mj_m2": "shortwave_radiation_sum"}
+HOURLY_VARIABLES = {"relative_humidity_mean_pct": "relative_humidity_2m", "apparent_temperature_mean_c": "apparent_temperature", "cloud_cover_mean_pct": "cloud_cover", "dew_point_mean_c": "dew_point_2m"}
+EXPECTED_UNITS = {"temperature_mean_c": "°C", "temperature_min_c": "°C", "temperature_max_c": "°C", "precipitation_mm": "mm", "wind_speed_max_kmh": "km/h", "sunshine_duration_hours": "s", "wind_gust_max_kmh": "km/h", "precipitation_hours": "h", "wind_direction_dominant_deg": "°", "shortwave_radiation_mj_m2": "MJ/m²", "relative_humidity_mean_pct": "%", "apparent_temperature_mean_c": "°C", "cloud_cover_mean_pct": "%", "dew_point_mean_c": "°C"}
+NASA_VARIABLES = {"solar_radiation": "ALLSKY_SFC_SW_DWN", "nasa_temperature_mean_c": "T2M", "nasa_relative_humidity_pct": "RH2M", "nasa_wind_speed_m_s": "WS10M"}
 WEATHER_CACHE_TTL = 6 * 3600
 MAX_WEATHER_DAYS = 3653
 CACHE_MAX_ENTRIES = 128
@@ -26,9 +28,11 @@ async def fetch_weather(location_ids: list[str], start: date, end: date, variabl
         raise ValueError("Choose one to three registered locations")
     if (end - start).days < 0 or (end - start).days >= MAX_WEATHER_DAYS or end >= date.today():
         raise ValueError("Choose up to 3,653 historical weather days ending before today")
-    selected = tuple(sorted(set(variables or VARIABLES)))
-    if not selected or set(selected) - set(VARIABLES):
+    selected = tuple(sorted(set(variables or ("temperature_mean_c", "temperature_min_c", "temperature_max_c", "precipitation_mm", "wind_speed_max_kmh"))))
+    if not selected or set(selected) - set(VARIABLES) - set(HOURLY_VARIABLES):
         raise ValueError("Choose supported climate variables")
+    if set(selected) & set(HOURLY_VARIABLES) and (end - start).days > 366:
+        raise ValueError("Hourly-derived daily fields are limited to 367 days per request; use the existing daily-only fields for a ten-year fetch")
     if timezone_name not in {"Asia/Manila", "UTC"}:
         raise ValueError("Choose Asia/Manila or UTC daily time")
     if len(location_ids) > 1:
@@ -51,33 +55,46 @@ async def fetch_weather(location_ids: list[str], start: date, end: date, variabl
                 cache_hits += 1
                 continue
             loc = LOCATIONS[key]
-            params = {"latitude": loc["latitude"], "longitude": loc["longitude"], "start_date": start.isoformat(), "end_date": end.isoformat(), "daily": ",".join(VARIABLES[name] for name in selected), "timezone": timezone_name, "models": "era5"}
+            params = {"latitude": loc["latitude"], "longitude": loc["longitude"], "start_date": start.isoformat(), "end_date": end.isoformat(), "timezone": timezone_name, "models": "era5"}
+            daily_selected = [name for name in selected if name in VARIABLES]
+            hourly_selected = [name for name in selected if name in HOURLY_VARIABLES]
+            if daily_selected:
+                params["daily"] = ",".join(VARIABLES[name] for name in daily_selected)
+            if hourly_selected:
+                params["hourly"] = ",".join(HOURLY_VARIABLES[name] for name in hourly_selected)
             for attempt in range(2):
                 try:
                     response = await client.get(ARCHIVE_URL, params=params)
                     response.raise_for_status()
                     payload = response.json()
-                    daily = payload["daily"]
-                    dates = daily["time"]
-                    if not isinstance(dates, list) or not dates or any(name not in daily or not isinstance(daily[name], list) or len(daily[name]) != len(dates) for name in (VARIABLES[var] for var in selected)):
+                    daily = payload.get("daily", {})
+                    hourly = payload.get("hourly", {})
+                    dates = daily.get("time") or sorted({stamp[:10] for stamp in hourly.get("time", [])})
+                    if not isinstance(dates, list) or not dates or any(name not in daily or not isinstance(daily[name], list) or len(daily[name]) != len(dates) for name in (VARIABLES[var] for var in daily_selected)):
                         raise ValueError("Open-Meteo returned incomplete daily arrays")
                     units = payload.get("daily_units", {})
-                    expected_units = {"temperature_mean_c": "°C", "temperature_min_c": "°C", "temperature_max_c": "°C", "precipitation_mm": "mm", "wind_speed_max_kmh": "km/h"}
                     for name in selected:
-                        if units and units.get(VARIABLES[name]) != expected_units[name]:
+                        provider = VARIABLES.get(name) or HOURLY_VARIABLES[name]
+                        reported = (units if name in VARIABLES else payload.get("hourly_units", {})).get(provider)
+                        if reported != EXPECTED_UNITS[name]:
                             raise ValueError(f"Open-Meteo returned unexpected units for {name}")
-                    frame = pd.DataFrame({
-                        "location_id": key, "date": dates, "model": "era5",
-                        "temperature_mean_c": daily.get("temperature_2m_mean"),
-                        "temperature_min_c": daily.get("temperature_2m_min"),
-                        "temperature_max_c": daily.get("temperature_2m_max"),
-                        "precipitation_mm": daily.get("precipitation_sum"),
-                        "wind_speed_max_kmh": daily.get("wind_speed_10m_max"),
-                    })
+                    frame = pd.DataFrame({"location_id": key, "date": dates, "model": "era5"})
+                    for name in daily_selected:
+                        values = pd.to_numeric(pd.Series(daily[VARIABLES[name]]), errors="coerce")
+                        frame[name] = values / 3600 if name == "sunshine_duration_hours" else values
+                    if hourly_selected:
+                        stamps = hourly.get("time", [])
+                        if not stamps or any(HOURLY_VARIABLES[name] not in hourly or len(hourly[HOURLY_VARIABLES[name]]) != len(stamps) for name in hourly_selected):
+                            raise ValueError("Open-Meteo returned incomplete hourly arrays")
+                        hourly_frame = pd.DataFrame({"date": [stamp[:10] for stamp in stamps]})
+                        for name in hourly_selected:
+                            hourly_frame[name] = pd.to_numeric(pd.Series(hourly[HOURLY_VARIABLES[name]]), errors="coerce")
+                        frame = frame.merge(hourly_frame.groupby("date", as_index=False)[hourly_selected].mean(), on="date", how="left", validate="one_to_one")
                     frame["analysis_time_standard"] = timezone_name
                     frame["openmeteo_grid_latitude"] = payload.get("latitude")
                     frame["openmeteo_grid_longitude"] = payload.get("longitude")
                     frame["openmeteo_dataset_version"] = "ERA5"
+                    frame.attrs["provider_units"] = {name: (units if name in VARIABLES else payload.get("hourly_units", {})).get(VARIABLES.get(name) or HOURLY_VARIABLES.get(name)) for name in selected}
                     frames.append(frame)
                     while len(weather_cache) >= CACHE_MAX_ENTRIES:
                         weather_cache.pop(next(iter(weather_cache)))
@@ -117,7 +134,7 @@ def parse_nasa_payload(payload: dict, location_id: str, selected: tuple[str, ...
     rows = []
     fill = payload.get("header", {}).get("fill_value", -999)
     for key in sorted(keys):
-        row = {"location_id": location_id, "date": pd.to_datetime(key, format="%Y%m%d", errors="raise"), "nasa_solar_radiation": np.nan, "nasa_temperature_mean_c": np.nan}
+        row = {"location_id": location_id, "date": pd.to_datetime(key, format="%Y%m%d", errors="raise"), "nasa_solar_radiation": np.nan, "nasa_temperature_mean_c": np.nan, "nasa_relative_humidity_pct": np.nan, "nasa_wind_speed_m_s": np.nan}
         for name in selected:
             raw = series[NASA_VARIABLES[name]].get(key)
             number = pd.to_numeric(raw, errors="coerce")
@@ -137,7 +154,7 @@ async def fetch_nasa(location_ids: list[str], start: date, end: date, variables:
         raise ValueError("Choose up to 367 historical days ending before today")
     selected = tuple(sorted(set(variables or ["solar_radiation"])))
     if not selected or set(selected) - set(NASA_VARIABLES) or "solar_radiation" not in selected:
-        raise ValueError("Select NASA solar radiation and optional temperature")
+        raise ValueError("Select NASA solar radiation and supported optional comparison fields")
     if len(location_ids) > 1:
         parts = await asyncio.gather(*(fetch_nasa([key], start, end, variables) for key in location_ids))
         frames = [frame for frame, _, _, _ in parts if not frame.empty]

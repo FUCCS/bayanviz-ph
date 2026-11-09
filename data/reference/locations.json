@@ -1,12 +1,217 @@
 {
-  "version": "2026-11-09-location-v1",
+  "version": "2026-11-09-location-v2",
   "classification_date": "2026-11-08",
   "note": "Representative city coordinates are registered locations within each province, not province-wide measurements.",
   "locations": [
-    {"id":"dumaguete","name":"Dumaguete","province":"Negros Oriental","region":"Negros Island Region","latitude":9.3068,"longitude":123.3054,"source":"city-centre reference coordinate","scope":"location point"},
-    {"id":"bacolod","name":"Bacolod","province":"Negros Occidental","region":"Negros Island Region","latitude":10.6765,"longitude":122.9509,"source":"city-centre reference coordinate","scope":"location point"},
-    {"id":"cebu","name":"Cebu City","province":"Cebu","region":"Central Visayas","latitude":10.3157,"longitude":123.8854,"source":"city-centre reference coordinate","scope":"location point"},
-    {"id":"tagbilaran","name":"Tagbilaran","province":"Bohol","region":"Central Visayas","latitude":9.6475,"longitude":123.8530,"source":"city-centre reference coordinate","scope":"location point"},
-    {"id":"siquijor","name":"Siquijor","province":"Siquijor","region":"Negros Island Region","latitude":9.2150,"longitude":123.5150,"source":"city-centre reference coordinate","scope":"location point"}
+    {
+      "id": "dumaguete",
+      "name": "Dumaguete",
+      "province": "Negros Oriental",
+      "region": "Negros Island Region",
+      "latitude": 9.3068,
+      "longitude": 123.3054,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    },
+    {
+      "id": "bacolod",
+      "name": "Bacolod",
+      "province": "Negros Occidental",
+      "region": "Negros Island Region",
+      "latitude": 10.6765,
+      "longitude": 122.9509,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    },
+    {
+      "id": "cebu",
+      "name": "Cebu City",
+      "province": "Cebu",
+      "region": "Central Visayas",
+      "latitude": 10.3157,
+      "longitude": 123.8854,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    },
+    {
+      "id": "tagbilaran",
+      "name": "Tagbilaran",
+      "province": "Bohol",
+      "region": "Central Visayas",
+      "latitude": 9.6475,
+      "longitude": 123.853,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    },
+    {
+      "id": "siquijor",
+      "name": "Siquijor",
+      "province": "Siquijor",
+      "region": "Negros Island Region",
+      "latitude": 9.215,
+      "longitude": 123.515,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    },
+    {
+      "id": "manila",
+      "name": "Manila",
+      "province": "Metro Manila",
+      "region": "National Capital Region",
+      "latitude": 14.5995,
+      "longitude": 120.9842,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    },
+    {
+      "id": "baguio",
+      "name": "Baguio",
+      "province": "Benguet",
+      "region": "Cordillera Administrative Region",
+      "latitude": 16.4023,
+      "longitude": 120.596,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    },
+    {
+      "id": "laoag",
+      "name": "Laoag",
+      "province": "Ilocos Norte",
+      "region": "Ilocos Region",
+      "latitude": 18.1978,
+      "longitude": 120.5957,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    },
+    {
+      "id": "tuguegarao",
+      "name": "Tuguegarao",
+      "province": "Cagayan",
+      "region": "Cagayan Valley",
+      "latitude": 17.6132,
+      "longitude": 121.727,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    },
+    {
+      "id": "san_fernando_pampanga",
+      "name": "San Fernando",
+      "province": "Pampanga",
+      "region": "Central Luzon",
+      "latitude": 15.0343,
+      "longitude": 120.6844,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    },
+    {
+      "id": "calamba",
+      "name": "Calamba",
+      "province": "Laguna",
+      "region": "CALABARZON",
+      "latitude": 14.2117,
+      "longitude": 121.1653,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    },
+    {
+      "id": "calapan",
+      "name": "Calapan",
+      "province": "Oriental Mindoro",
+      "region": "MIMAROPA Region",
+      "latitude": 13.4117,
+      "longitude": 121.1803,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    },
+    {
+      "id": "legazpi",
+      "name": "Legazpi",
+      "province": "Albay",
+      "region": "Bicol Region",
+      "latitude": 13.1391,
+      "longitude": 123.7438,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    },
+    {
+      "id": "iloilo",
+      "name": "Iloilo City",
+      "province": "Iloilo",
+      "region": "Western Visayas",
+      "latitude": 10.7202,
+      "longitude": 122.5621,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    },
+    {
+      "id": "tacloban",
+      "name": "Tacloban",
+      "province": "Leyte",
+      "region": "Eastern Visayas",
+      "latitude": 11.2433,
+      "longitude": 125.0043,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    },
+    {
+      "id": "zamboanga",
+      "name": "Zamboanga City",
+      "province": "Zamboanga del Sur",
+      "region": "Zamboanga Peninsula",
+      "latitude": 6.9214,
+      "longitude": 122.079,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    },
+    {
+      "id": "cagayan_de_oro",
+      "name": "Cagayan de Oro",
+      "province": "Misamis Oriental",
+      "region": "Northern Mindanao",
+      "latitude": 8.4542,
+      "longitude": 124.6319,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    },
+    {
+      "id": "davao",
+      "name": "Davao City",
+      "province": "Davao del Sur",
+      "region": "Davao Region",
+      "latitude": 7.1907,
+      "longitude": 125.4553,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    },
+    {
+      "id": "koronadal",
+      "name": "Koronadal",
+      "province": "South Cotabato",
+      "region": "SOCCSKSARGEN",
+      "latitude": 6.5031,
+      "longitude": 124.8469,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    },
+    {
+      "id": "butuan",
+      "name": "Butuan",
+      "province": "Agusan del Norte",
+      "region": "Caraga",
+      "latitude": 8.9475,
+      "longitude": 125.5406,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    },
+    {
+      "id": "cotabato",
+      "name": "Cotabato City",
+      "province": "Maguindanao del Norte",
+      "region": "Bangsamoro Autonomous Region in Muslim Mindanao",
+      "latitude": 7.2236,
+      "longitude": 124.2464,
+      "source": "city-centre reference coordinate",
+      "scope": "location point"
+    }
   ]
 }

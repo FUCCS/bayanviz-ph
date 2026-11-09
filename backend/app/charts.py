@@ -18,7 +18,8 @@ import seaborn as sns
 from statsmodels.graphics.mosaicplot import mosaic
 
 from .catalog import LOCATIONS
-from .processing import RAINY_DAY_MM, correlation_table, period_table
+from .advanced import ADVANCED_CHARTS, prepare_advanced
+from .processing import CLIMATE_COLUMNS, RAINY_DAY_MM, correlation_table, period_table
 
 RENDER_LOCK = threading.Lock()
 PALETTE = {"rainy": "#1f7fa8", "dry": "#e2a548"}
@@ -121,12 +122,13 @@ def build_map(table: pd.DataFrame):
     for row in table.itertuples():
         lat, lon = float(row.latitude), float(row.longitude)
         label = html.escape(str(row.location_name))
-        temp = float(row.temperature_value_c)
-        rainfall = float(row.average_daily_rain_mm)
+        temp = float(row.temperature_value_c) if pd.notna(row.temperature_value_c) else np.nan
+        rainfall = float(row.average_daily_rain_mm) if pd.notna(row.average_daily_rain_mm) else 0.0
         radius = float(np.clip(5 + 2.5 * np.sqrt(max(rainfall, 0)), 5, 22))
-        color = "red" if temp >= 28 else "orange" if temp >= 26 else "blue"
+        color = "gray" if np.isnan(temp) else "red" if temp >= 28 else "orange" if temp >= 26 else "blue"
         selected_value = f"{float(row.selected_measure_value):.1f} {html.escape(str(row.selected_measure_unit))}" if pd.notna(row.selected_measure_value) else "unavailable"
-        popup = f"<b>{label}</b><br>{html.escape(str(row.province))} · Uploaded weather point<br>Selected {html.escape(str(row.selected_variable))}: {selected_value}<br>Temperature used for marker color: {temp:.1f} °C ({int(row.temperature_valid_days)} valid days)<br>Average daily rain used for circle size: {rainfall:.1f} mm ({int(row.rain_valid_days)} valid days)"
+        temperature = f"{temp:.1f} °C" if np.isfinite(temp) else "unavailable"
+        popup = f"<b>{label}</b><br>{html.escape(str(row.province))} · {html.escape(str(row.region))} sampling point<br>Period: {html.escape(str(row.period_start))} to {html.escape(str(row.period_end))}<br>Selected {html.escape(str(row.selected_variable))}: {selected_value}<br>Valid selected observations: {int(row.selected_valid_days)} of {int(row.observed_days)} ({row.selected_coverage_pct:.1f}%); missing {int(row.selected_missing_days)}<br>Mean temperature: {temperature}; mean daily rainfall: {rainfall:.1f} mm<br>Source model: {html.escape(str(row.model))}<br>Difference from other loaded sampling points: {row.difference_from_loaded_mean:+.1f} {html.escape(str(row.selected_measure_unit))}"
         folium.Marker([lat, lon], popup=folium.Popup(popup, max_width=300), tooltip=label, icon=folium.Icon(color=color, icon="cloud")).add_to(point_layer)
         folium.CircleMarker([lat, lon], radius=radius, color="#0d6b9a", fill=True, fill_opacity=0.4, popup=folium.Popup(popup, max_width=300)).add_to(rain_layer)
     point_layer.add_to(map_obj)
@@ -154,16 +156,26 @@ REGISTRY = {
     "mosaic": ("Chapter 08", "Mosaic plot", "mosaic()", "Compare rainy and dry day frequencies", build_mosaic, "weather"),
     "treemap": ("Chapter 08", "Treemap", "px.treemap()", "Explore additive rainy-day observation counts", build_treemap, "weather"),
     "map": ("Chapter 09", "Markers and map symbols", "folium.Map(); folium.Marker(); folium.CircleMarker()", "Map uploaded climate statistics", build_map, "weather"),
+    **{key: ("Chapter 08", title, function, objective, builder, "weather") for key, (title, function, objective, builder) in ADVANCED_CHARTS.items()},
 }
 
 
-def prepare_chart(chart_id: str, weather: pd.DataFrame, variable: str = "temperature_mean_c", aggregation: str = "annual", relationship_aggregation: str = "daily") -> tuple[pd.DataFrame, str, list[str], dict]:
+def prepare_chart(chart_id: str, weather: pd.DataFrame, variable: str = "temperature_mean_c", aggregation: str = "annual", relationship_aggregation: str = "daily", hot_threshold: float = 35.0, wind_threshold: float = 50.0) -> tuple[pd.DataFrame, str, list[str], dict]:
     """Construct the chart input from the already filtered daily observations."""
     if chart_id not in REGISTRY:
         raise ValueError("Unknown chart")
     if weather.empty:
         raise ValueError("No observations for the selected dates and locations")
-    if variable not in {"temperature_mean_c", "temperature_min_c", "temperature_max_c", "precipitation_mm", "wind_speed_max_kmh"}:
+    if chart_id in ADVANCED_CHARTS:
+        table, units, caveats = prepare_advanced(chart_id, weather, hot_threshold, wind_threshold)
+        facts = {"threshold": hot_threshold if chart_id == "hot_days" else wind_threshold if chart_id == "strong_wind_days" else None}
+        if chart_id in {"temperature_humidity", "rain_duration"}:
+            x, y = ("relative_humidity_mean_pct", "temperature_mean_c") if chart_id == "temperature_humidity" else ("precipitation_hours", "precipitation_mm")
+            facts["paired_observations"] = len(table)
+            facts["pearson_r"] = float(table[x].corr(table[y])) if len(table) >= 3 and table[x].nunique() > 1 and table[y].nunique() > 1 else None
+        return table, units, caveats, facts
+    map_metrics = {"mean_daily_rain_mm", "rainy_day_pct", "temperature_range_c", "coverage_pct", "nasa_solar_radiation_kwh_m2_day"}
+    if variable not in {"temperature_mean_c", "temperature_min_c", "temperature_max_c", "precipitation_mm", "wind_speed_max_kmh"} and not (chart_id == "map" and variable in set(CLIMATE_COLUMNS) | map_metrics):
         raise ValueError("Choose a supported weather measure")
     if aggregation not in {"daily", "monthly", "annual"}:
         raise ValueError("Choose daily, monthly, or annual grouping")
@@ -261,13 +273,37 @@ def prepare_chart(chart_id: str, weather: pd.DataFrame, variable: str = "tempera
     rows = []
     for key, group in weather.groupby("location_id"):
         loc = LOCATIONS.get(key)
-        if not loc or group.temperature_mean_c.count() == 0 or group.precipitation_mm.count() == 0:
+        if not loc:
             continue
-        selected_measure = group[variable].sum(min_count=1) if variable == "precipitation_mm" else group[variable].max() if variable == "wind_speed_max_kmh" else group[variable].mean()
-        color_temp = group[variable].mean() if variable.startswith("temperature_") and group[variable].count() else group.temperature_mean_c.mean()
-        rows.append({"location_id": key, "location_name": loc["name"], "province": loc["province"], "region": loc["region"], "latitude": loc["latitude"], "longitude": loc["longitude"], "temperature_value_c": color_temp, "temperature_mean_c": group.temperature_mean_c.mean(), "temperature_valid_days": int(group[variable].count()) if variable.startswith("temperature_") else int(group.temperature_mean_c.count()), "average_daily_rain_mm": group.precipitation_mm.mean(), "rain_valid_days": int(group.precipitation_mm.count()), "selected_variable": variable, "selected_measure_value": selected_measure, "selected_measure_unit": "mm" if variable == "precipitation_mm" else "km/h" if variable == "wind_speed_max_kmh" else "°C"})
+        valid_rain = int(group.precipitation_mm.count())
+        temperature_range = (group.temperature_max_c - group.temperature_min_c).mean()
+        measures = {
+            "precipitation_mm": (group.precipitation_mm.sum(min_count=1), "mm total"),
+            "mean_daily_rain_mm": (group.precipitation_mm.mean(), "mm/valid day"),
+            "rainy_day_pct": (100 * group.precipitation_mm.ge(RAINY_DAY_MM).sum() / valid_rain if valid_rain else np.nan, "% valid rain days"),
+            "temperature_range_c": (temperature_range, "°C mean daily range"),
+            "coverage_pct": (100 * group.temperature_mean_c.count() / len(group), "% valid temperature records"),
+        }
+        if variable in measures:
+            selected_measure, unit = measures[variable]
+            valid_selected = valid_rain if variable in {"precipitation_mm", "mean_daily_rain_mm", "rainy_day_pct"} else int((group.temperature_max_c - group.temperature_min_c).count()) if variable == "temperature_range_c" else int(group.temperature_mean_c.count())
+        else:
+            if variable not in group or group[variable].count() == 0:
+                continue
+            selected_measure = group[variable].max() if variable in {"wind_speed_max_kmh", "wind_gust_max_kmh", "temperature_max_c"} else group[variable].mean()
+            valid_selected = int(group[variable].count())
+            unit = "%" if variable in {"relative_humidity_mean_pct", "cloud_cover_mean_pct"} else "hours" if variable in {"sunshine_duration_hours", "precipitation_hours"} else "km/h" if variable in {"wind_speed_max_kmh", "wind_gust_max_kmh"} else "kWh/m²/day" if variable == "nasa_solar_radiation_kwh_m2_day" else "MJ/m²" if variable == "shortwave_radiation_mj_m2" else "°"
+            if variable.startswith("temperature_") or variable in {"apparent_temperature_mean_c", "dew_point_mean_c"}:
+                unit = "°C"
+        if pd.isna(selected_measure):
+            continue
+        rows.append({"location_id": key, "location_name": loc["name"], "province": loc["province"], "region": loc["region"], "latitude": loc["latitude"], "longitude": loc["longitude"], "period_start": str(group.date.min().date()), "period_end": str(group.date.max().date()), "model": ", ".join(sorted(group.model.astype(str).unique())), "observed_days": len(group), "temperature_value_c": group.temperature_mean_c.mean(), "temperature_mean_c": group.temperature_mean_c.mean(), "temperature_valid_days": int(group.temperature_mean_c.count()), "average_daily_rain_mm": group.precipitation_mm.mean(), "rain_valid_days": valid_rain, "selected_variable": variable, "selected_measure_value": selected_measure, "selected_measure_unit": unit, "selected_valid_days": valid_selected, "selected_missing_days": len(group) - valid_selected, "selected_coverage_pct": round(100 * valid_selected / len(group), 1)})
     table = pd.DataFrame(rows)
-    return table, "°C / mm per valid day", caveats + ["Map circles use average daily rainfall over valid days, not a risk measure. Selected precipitation totals sum valid days only. OSM provides map tiles only.", "Uploaded locations without validated registry coordinates are omitted from the map."], facts
+    if table.empty:
+        raise ValueError("No selected map measure has valid observations at registered locations")
+    reference = table.selected_measure_value.mean()
+    table["difference_from_loaded_mean"] = table.selected_measure_value - reference
+    return table, str(table.selected_measure_unit.iloc[0]), caveats + ["Comparison is against the mean of loaded sampling points with the same selected metric; it is not a regional average.", "Map circles use mean daily rainfall over valid days. OSM provides map tiles only. Unregistered coordinates are omitted."], facts
 
 
 def render_chart(chart_id: str, table: pd.DataFrame) -> dict:
@@ -286,6 +322,23 @@ def render_chart(chart_id: str, table: pd.DataFrame) -> dict:
 
 def interpretation(chart_id: str, table: pd.DataFrame, caveats: list[str], facts: dict) -> dict:
     count = len(table)
+    if chart_id in ADVANCED_CHARTS:
+        if chart_id in {"temperature_humidity", "rain_duration"}:
+            r = facts["pearson_r"]
+            finding = f"{count} paired daily observations; Pearson r = {r:.3f}." if r is not None else f"{count} paired daily observations; Pearson r is unavailable because values are constant or too few."
+        elif chart_id in {"hot_days", "strong_wind_days"}:
+            valid = int(table.valid_days.sum())
+            hits = int(table.days_above_threshold.sum())
+            finding = f"{hits} of {valid} valid daily observations ({100 * hits / valid:.1f}%) met the user-selected threshold of {facts['threshold']:g} {table.threshold_unit.iloc[0]}." if valid else "No valid daily observations met the field requirement."
+        elif chart_id == "coverage":
+            available = table[table.field_status.eq("available")]
+            finding = f"{len(available)} available location-year-field cells; {int(table.field_status.eq('absent').sum())} cells have an absent optional field. Coverage uses calendar days as denominator."
+        elif chart_id == "temperature_range":
+            finding = f"Median daily maximum-minus-minimum temperature is {table.temperature_range_c.median():.1f} °C from {count} valid paired days."
+        else:
+            valid = table[table.period_status.eq("≥90% valid days") & table.precipitation_mm.notna()]
+            finding = f"{len(valid)} calendar periods have at least 90% valid rainfall days; {int(table.period_status.ne('≥90% valid days').sum())} periods are partial or below coverage threshold."
+        return {"label": "Statistical Interpretation", "shows": REGISTRY[chart_id][3], "findings": finding, "evidence": f"The evidence table has {count} chart-input rows; the full table is downloadable.", "relevance": "Compare observations at the registered sampling points and examine data coverage before drawing conclusions.", "limitations": caveats}
     if chart_id in {"bubble", "rain_wind"}:
         r = facts["pearson_r"]
         if r is None:
@@ -315,12 +368,13 @@ def interpretation(chart_id: str, table: pd.DataFrame, caveats: list[str], facts
         total = int(table["count"].sum())
         finding = f"{rainy} of {total} valid precipitation days ({100 * rainy / total:.1f}%) met the 1 mm rainy-day threshold."
     else:
-        leader = table.sort_values("average_daily_rain_mm", ascending=False).iloc[0]
-        finding = f"The highest mapped mean daily rainfall is {leader.average_daily_rain_mm:.1f} mm at {leader.location_name}, from {int(leader.rain_valid_days)} valid days."
+        leader = table.sort_values("selected_measure_value", ascending=False).iloc[0]
+        finding = f"The highest mapped {leader.selected_variable} is {leader.selected_measure_value:.1f} {leader.selected_measure_unit} at {leader.location_name}, from {int(leader.selected_valid_days)} valid observations ({leader.selected_coverage_pct:.1f}% of loaded days)."
     return {"label": "Statistical Interpretation", "shows": REGISTRY[chart_id][3], "findings": finding, "evidence": f"The evidence table has {count} chart-input rows; the first 30 appear here and the full table is downloadable.", "relevance": "Compare locations and periods for further climate research; association does not establish a cause.", "limitations": caveats}
 
 
 def code_for(chart_id: str) -> dict:
     entry = REGISTRY[chart_id]
     highlights = {"bar": ["sns.barplot"], "line": ["sns.lineplot"], "year_compare": ["sns.lineplot"], "box": ["sns.boxplot"], "bubble": ["sns.scatterplot"], "rain_wind": ["sns.scatterplot"], "heatmap": ["pivot_table", "sns.heatmap"], "mosaic": ["mosaic("], "treemap": ["px.treemap"], "map": ["folium.Map", "folium.Marker", "folium.CircleMarker"]}
-    return {"visualization": inspect.getsource(entry[4]), "preparation": inspect.getsource(prepare_chart), "topic": {"chapter": entry[0], "topic": entry[1], "library_function": entry[2], "objective": entry[3]}, "highlights": highlights[chart_id]}
+    preparation = inspect.getsource(prepare_advanced) + "\n\n" + inspect.getsource(prepare_chart) if chart_id in ADVANCED_CHARTS else inspect.getsource(prepare_chart)
+    return {"visualization": inspect.getsource(entry[4]), "preparation": preparation, "topic": {"chapter": entry[0], "topic": entry[1], "library_function": entry[2], "objective": entry[3]}, "highlights": highlights.get(chart_id, [entry[2].split(";")[-1].strip().replace("()", "")])}

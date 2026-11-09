@@ -22,7 +22,7 @@ from .catalog import LOCATIONS
 from .charts import PALETTE, REGISTRY as CHARTS, code_for, interpretation, prepare_chart, render_chart
 from .connectors import MAX_WEATHER_DAYS, fetch_nasa, fetch_weather, parse_nasa_payload
 from .multisource import MS_BUILDERS, MS_CHARTS, merge_sources, multisource_code, multisource_interpretation, normalize_nasa, prepare_multisource_chart, render_multisource_chart, validate_sources
-from .processing import MIN_PERIOD_COVERAGE, RAINY_DAY_MM, WEATHER_COLUMNS, climate_summary, date_bounds, filter_hash, filter_weather, period_table, prepare_weather, safe_number
+from .processing import ADVANCED_COLUMNS, CLIMATE_COLUMNS, SCHEMA_VERSION, MIN_PERIOD_COVERAGE, RAINY_DAY_MM, WEATHER_COLUMNS, climate_summary, date_bounds, filter_hash, filter_weather, period_table, prepare_weather, safe_number
 
 app = FastAPI(title="BayanViz PH API", version="0.1.0")
 origins = [s.strip() for s in os.getenv("FRONTEND_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if s.strip()]
@@ -78,6 +78,8 @@ class AnalysisRequest(BaseModel):
     variable: str = "temperature_mean_c"
     aggregation: str = "annual"
     relationship_aggregation: str = "daily"
+    hot_threshold: float = Field(default=35.0, ge=-15, le=60)
+    wind_threshold: float = Field(default=50.0, ge=0, le=300)
 
 
 class ScopeRequest(BaseModel):
@@ -142,7 +144,7 @@ def mapped_nasa_upload(upload: pd.DataFrame, request: MultiValidateRequest) -> t
             if "nasa_temperature_mean_c" in frame and frame.nasa_temperature_mean_c.notna().any():
                 parameters["T2M"] = {"units": request.nasa_temperature_unit}
             metadata[key] = {"provider": "Uploaded secondary climate data", "dataset_version": "uploaded-declared", "parameter_metadata": parameters, "grid_latitude": grid_lat, "grid_longitude": grid_lon, "time_standard": "UTC"}
-    return frame[[col for col in ["location_id", "date", "nasa_solar_radiation", "nasa_temperature_mean_c"] if col in frame]], metadata
+    return frame[[col for col in ["location_id", "date", "nasa_solar_radiation", "nasa_temperature_mean_c", "nasa_relative_humidity_pct", "nasa_wind_speed_m_s"] if col in frame]], metadata
 
 
 @app.get("/api/health")
@@ -174,7 +176,9 @@ def catalog():
         "name": "BayanViz PH", "subtitle": "Philippine Historical Climate Data Analytics",
         "locations": list(LOCATIONS.values()),
         "charts": [{"id": key, "chapter": row[0], "topic": row[1], "function": row[2], "objective": row[3], "needs": row[5]} for key, row in CHARTS.items()] + [{"id": key, "chapter": "Climate integration", "topic": row[0], "function": row[1], "objective": row[2], "needs": "merged"} for key, row in MS_CHARTS.items()],
-        "variables": WEATHER_COLUMNS,
+        "variables": CLIMATE_COLUMNS,
+        "essential_variables": WEATHER_COLUMNS,
+        "schema_version": SCHEMA_VERSION,
         "upload_limit_mb": MAX_UPLOAD_MB, "upload_limit_rows": MAX_UPLOAD_ROWS,
         "upload_limit_columns": MAX_UPLOAD_COLUMNS, "uploads_per_session": MAX_UPLOADS_PER_SESSION,
     }
@@ -208,6 +212,32 @@ def selected_weather(source: str, state: dict) -> tuple[pd.DataFrame, str, dict]
     return frame.copy(), label, {"retrieved_at_utc": state["retrieved_at"]}
 
 
+CHART_REQUIREMENTS = {
+    "bar": ["precipitation_mm"], "line": [], "year_compare": ["temperature_mean_c"],
+    "box": [], "bubble": ["precipitation_mm", "temperature_mean_c", "wind_speed_max_kmh"],
+    "rain_wind": ["precipitation_mm", "wind_speed_max_kmh"], "heatmap": ["precipitation_mm"],
+    "mosaic": ["precipitation_mm"], "treemap": ["precipitation_mm"],
+    "map": [], "annual_rain": ["precipitation_mm"],
+    "rain_year_month": ["precipitation_mm"], "coverage": [],
+    "hot_days": ["temperature_max_c"], "strong_wind_days": ["wind_speed_max_kmh"],
+    "temperature_range": ["temperature_max_c", "temperature_min_c"],
+    "temperature_humidity": ["temperature_mean_c", "relative_humidity_mean_pct"],
+    "rain_duration": ["precipitation_mm", "precipitation_hours"],
+}
+
+
+def chart_compatibility(weather: pd.DataFrame) -> dict[str, dict]:
+    available = {column for column in CLIMATE_COLUMNS if column in weather and weather[column].notna().any()}
+    report = {}
+    for chart_id, required in CHART_REQUIREMENTS.items():
+        missing = sorted(set(required) - available)
+        if chart_id == "map" and not available:
+            missing = ["one valid climate measure"]
+        report[chart_id] = {"available": not missing, "missing_fields": missing,
+                            "reason": "Available" if not missing else "Requires " + ", ".join(missing)}
+    return report
+
+
 @app.post("/api/dataset")
 def dataset(request: ScopeRequest, auth=Depends(session)):
     _, state = auth
@@ -224,8 +254,8 @@ def dataset(request: ScopeRequest, auth=Depends(session)):
             subset = subset[subset.date.le(pd.Timestamp(request.end_date))]
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    variables = [name for name in WEATHER_COLUMNS if weather[name].notna().any()]
-    return {**bounds, "available_locations": sorted(weather.location_id.unique().tolist()), "selected_observations": len(subset), "selected_valid_temperature": int(subset.temperature_mean_c.count()), "selected_valid_rainfall": int(subset.precipitation_mm.count()), "source": status, "variables": variables, "retrieved_at": metadata.get("retrieved_at_utc"), "model": sorted(weather.model.unique().tolist())}
+    variables = [name for name in CLIMATE_COLUMNS if weather[name].notna().any()]
+    return {**bounds, "available_locations": sorted(weather.location_id.unique().tolist()), "selected_observations": len(subset), "selected_valid_temperature": int(subset.temperature_mean_c.count()), "selected_valid_rainfall": int(subset.precipitation_mm.count()), "source": status, "variables": variables, "compatibility": chart_compatibility(weather), "schema_version": SCHEMA_VERSION, "retrieved_at": metadata.get("retrieved_at_utc"), "model": sorted(weather.model.unique().tolist())}
 
 
 @app.post("/api/summary")
@@ -301,7 +331,7 @@ async def fetch(request: FetchRequest, auth=Depends(session)):
         if value["session_id"] == token:
             del results[key]
     bounds = date_bounds(cleaned)
-    return {"status": "Cached API" if cache_hits == len(request.locations) else "Live API", "records": len(cleaned), "errors": errors, "cache_hits": cache_hits, "preview": json.loads(cleaned.head(8).to_json(orient="records", date_format="iso")), "retrieved_at": state["retrieved_at"], "observation_period": [bounds["min_date"], bounds["max_date"]], "locations": bounds["locations"], "variables": [name for name in WEATHER_COLUMNS if cleaned[name].notna().any()]}
+    return {"status": "Cached API" if cache_hits == len(request.locations) else "Live API", "records": len(cleaned), "errors": errors, "cache_hits": cache_hits, "preview": json.loads(cleaned.head(8).to_json(orient="records", date_format="iso")), "retrieved_at": state["retrieved_at"], "observation_period": [bounds["min_date"], bounds["max_date"]], "locations": bounds["locations"], "variables": [name for name in CLIMATE_COLUMNS if cleaned[name].notna().any()], "schema_version": SCHEMA_VERSION}
 
 
 @app.post("/api/multisource/validate")
@@ -313,7 +343,7 @@ async def multisource_validate(request: MultiValidateRequest, auth=Depends(sessi
     state["requests"].append(time.time())
     if request.method not in {"merge", "compare"}:
         raise HTTPException(400, "Choose Merge Datasets or Compare Data Sources")
-    if not request.weather_variables or set(request.weather_variables) - set(WEATHER_COLUMNS):
+    if not request.weather_variables or set(request.weather_variables) - set(CLIMATE_COLUMNS):
         raise HTTPException(400, "Choose supported weather variables")
     if request.weather_source not in {"upload", "api"} or request.nasa_source not in {"upload", "api"}:
         raise HTTPException(400, "Choose an upload or API source")
@@ -436,7 +466,10 @@ def parse_upload(name: str, content: bytes) -> pd.DataFrame:
             nearby = min(LOCATIONS.values(), key=lambda loc: (loc["latitude"] - lat)**2 + (loc["longitude"] - lon)**2)
             if (nearby["latitude"] - lat)**2 + (nearby["longitude"] - lon)**2 >= 0.02:
                 raise ValueError("NASA JSON point is not close to a registered location")
-            selected = ("solar_radiation", "nasa_temperature_mean_c") if "T2M" in payload["properties"].get("parameter", {}) else ("solar_radiation",)
+            available_parameters = payload["properties"].get("parameter", {})
+            selected = tuple(name for name, code in (("solar_radiation", "ALLSKY_SFC_SW_DWN"), ("nasa_temperature_mean_c", "T2M"), ("nasa_relative_humidity_pct", "RH2M"), ("nasa_wind_speed_m_s", "WS10M")) if code in available_parameters)
+            if "solar_radiation" not in selected:
+                raise ValueError("NASA JSON needs ALLSKY_SFC_SW_DWN solar radiation")
             frame, info = parse_nasa_payload(payload, nearby["id"], selected)
             frame.attrs["nasa_metadata"] = {nearby["id"]: info}
             return frame
@@ -445,7 +478,26 @@ def parse_upload(name: str, content: bytes) -> pd.DataFrame:
                 "time": "date", "temperature_2m_mean": "temperature_mean_c",
                 "temperature_2m_min": "temperature_min_c", "temperature_2m_max": "temperature_max_c",
                 "precipitation_sum": "precipitation_mm", "wind_speed_10m_max": "wind_speed_max_kmh",
+                "sunshine_duration": "sunshine_duration_hours", "wind_gusts_10m_max": "wind_gust_max_kmh",
+                "precipitation_hours": "precipitation_hours", "wind_direction_10m_dominant": "wind_direction_dominant_deg",
+                "shortwave_radiation_sum": "shortwave_radiation_mj_m2",
             })
+            if "sunshine_duration_hours" in frame:
+                if payload.get("daily_units", {}).get("sunshine_duration") != "s":
+                    raise ValueError("Open-Meteo JSON sunshine duration needs reported seconds")
+                frame["sunshine_duration_hours"] = pd.to_numeric(frame.sunshine_duration_hours, errors="coerce") / 3600
+            hourly = payload.get("hourly", {})
+            hourly_names = {"relative_humidity_2m": "relative_humidity_mean_pct", "apparent_temperature": "apparent_temperature_mean_c", "cloud_cover": "cloud_cover_mean_pct", "dew_point_2m": "dew_point_mean_c"}
+            if isinstance(hourly, dict) and hourly.get("time"):
+                hours = pd.DataFrame({"date": [str(stamp)[:10] for stamp in hourly["time"]]})
+                for provider_name, canonical in hourly_names.items():
+                    if provider_name in hourly:
+                        if len(hourly[provider_name]) != len(hours):
+                            raise ValueError(f"Open-Meteo JSON has incomplete hourly {provider_name}")
+                        hours[canonical] = pd.to_numeric(pd.Series(hourly[provider_name]), errors="coerce")
+                columns = [name for name in hourly_names.values() if name in hours]
+                if columns:
+                    frame = frame.merge(hours.groupby("date", as_index=False)[columns].mean(), on="date", how="left", validate="one_to_one")
             lat, lon = payload.get("latitude"), payload.get("longitude")
             nearby = min(LOCATIONS.values(), key=lambda loc: (loc["latitude"] - lat)**2 + (loc["longitude"] - lon)**2) if isinstance(lat, (int, float)) and isinstance(lon, (int, float)) else None
             frame["location_id"] = nearby["id"] if nearby and (nearby["latitude"] - lat)**2 + (nearby["longitude"] - lon)**2 < 0.02 else "uploaded_point"
@@ -530,7 +582,7 @@ def use_upload(request: UseUploadRequest, auth=Depends(session)):
     state["weather_filename"] = df.attrs.get("filename")
     state["weather_source"] = f"Uploaded Dataset ({state['weather_filename']})"
     state["retrieved_at"] = datetime.now(timezone.utc).isoformat()
-    return {"status": "Uploaded Dataset", "valid_records": count, "observation_period": [str(cleaned.date.min().date()), str(cleaned.date.max().date())], "locations": sorted(cleaned.location_id.unique().tolist()), "variables": [name for name in WEATHER_COLUMNS if cleaned[name].notna().any()]}
+    return {"status": "Uploaded Dataset", "valid_records": count, "observation_period": [str(cleaned.date.min().date()), str(cleaned.date.max().date())], "locations": sorted(cleaned.location_id.unique().tolist()), "variables": [name for name in CLIMATE_COLUMNS if cleaned[name].notna().any()], "schema_version": SCHEMA_VERSION}
 
 
 @app.post("/api/analysis")
@@ -552,7 +604,7 @@ def analyze(request: AnalysisRequest, auth=Depends(session)):
             if state["multisource"]["report"].get("secondary_origin") == "user-upload":
                 caveats.append("Uploaded source values and declared units/time standard were supplied by a visitor and have not been independently verified.")
         else:
-            table, units, caveats, facts = prepare_chart(request.chart_id, weather, request.variable, request.aggregation, request.relationship_aggregation)
+            table, units, caveats, facts = prepare_chart(request.chart_id, weather, request.variable, request.aggregation, request.relationship_aggregation, request.hot_threshold, request.wind_threshold)
         if table.empty:
             raise ValueError("No valid observations after filtering")
         figure = render_multisource_chart(request.chart_id, table) if integrated else render_chart(request.chart_id, table)
@@ -565,7 +617,7 @@ def analyze(request: AnalysisRequest, auth=Depends(session)):
     record = {
         "analysis_id": result_id, "dataset_version": version, "filter_hash": filter_hash(filters), "chart_id": request.chart_id,
         "renderer": "Folium" if request.chart_id in {"map", "solar_map"} else "Plotly for Python" if request.chart_id == "treemap" else "Seaborn / Matplotlib" if request.chart_id != "mosaic" else "Statsmodels / Matplotlib",
-        "figure": figure, "supporting_data": table.head(30).replace({pd.NaT: None}).to_json(orient="records", date_format="iso"),
+        "figure": figure, "supporting_data": (table if request.chart_id == "rain_year_month" else table.head(30)).replace({pd.NaT: None}).to_json(orient="records", date_format="iso"),
         "supporting_columns": list(table.columns), "supporting_count": len(table),
         "computed_facts": multisource_interpretation(request.chart_id, table, facts, caveats) if integrated else interpretation(request.chart_id, table, caveats, facts), "python_source": multisource_code(request.chart_id) if integrated else code_for(request.chart_id),
         "statistics": facts,
