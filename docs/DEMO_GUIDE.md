@@ -11,5 +11,6 @@
 9. Clear My Data to remove temporary uploads and results.
 10. In Multi-Source Manager, choose one to three registered sample points and a historical period of up to 367 days. Validate Open-Meteo ERA5 and NASA POWER to inspect source units, UTC alignment, missing values, returned grids, and date overlap before merging.
 11. Click Merge and Analyze. Inspect matched and paired counts, change the analysis date range, and update the six Python-generated charts and Folium solar map. Open code and interpretation dialogs, download the quality report, and export a reproduction package from a chart.
+12. To use a downloaded secondary file, choose Uploaded NASA-compatible file, preview JSON/CSV/Parquet, map its columns, declare reported units and UTC when prompted, then validate. The report marks the upload as unverified.
 
 The bundled 2024–2025 data represent five sample points only. No nationwide inference follows from this presentation subset.

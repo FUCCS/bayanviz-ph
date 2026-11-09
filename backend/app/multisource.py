@@ -165,15 +165,15 @@ def prepare_multisource_chart(chart_id: str, frame: pd.DataFrame) -> tuple[pd.Da
         matrix = table[columns].corr() if len(table) >= 3 else pd.DataFrame()
         facts = {"paired_observations": len(table), "complete_case_policy": "All four variables must be valid for a location-date row", "correlations": json.loads(matrix.to_json()) if not matrix.empty else {}, "missing_by_variable": {name: int(frame[name].isna().sum()) for name in columns}}
     else:
-        table = frame[["location_id", "date", solar, "temperature_mean_c", "precipitation_mm"]].replace([np.inf, -np.inf], np.nan).dropna(subset=[solar]).copy()
-        grouped = table.groupby("location_id", as_index=False).agg(solar_mean=(solar, "mean"), valid_days=(solar, "count"), temperature_mean_c=("temperature_mean_c", "mean"), precipitation_mean_mm_day=("precipitation_mm", "mean"))
+        table = frame[["location_id", "date", solar, "temperature_mean_c", "precipitation_mm"]].replace([np.inf, -np.inf], np.nan).copy()
+        grouped = table.groupby("location_id", as_index=False).agg(solar_mean=(solar, "mean"), valid_days=(solar, "count"), primary_days=("date", "count"), temperature_mean_c=("temperature_mean_c", "mean"), precipitation_mean_mm_day=("precipitation_mm", "mean"))
         grouped["latitude"] = grouped.location_id.map(lambda key: LOCATIONS[key]["latitude"])
         grouped["longitude"] = grouped.location_id.map(lambda key: LOCATIONS[key]["longitude"])
         grouped["location_name"] = grouped.location_id.map(lambda key: LOCATIONS[key]["name"])
-        grouped["source_status"] = "Open-Meteo + NASA POWER"
+        grouped["source_status"] = np.where(grouped.valid_days.gt(0), "Open-Meteo + NASA POWER paired", "Open-Meteo primary only")
         table = grouped
         units = "kWh/m²/day"
-        facts = {"paired_observations": int(grouped.valid_days.sum()), "mapped_locations": len(grouped)}
+        facts = {"paired_observations": int(grouped.valid_days.sum()), "mapped_locations": len(grouped), "primary_only_locations": int(grouped.valid_days.eq(0).sum())}
     if table.empty:
         raise ValueError("No valid paired observations for this analysis and date range")
     if chart_id == "multi_correlation" and len(table) < 3:
@@ -199,18 +199,30 @@ def build_rain_solar(table: pd.DataFrame):
 
 def build_temp_compare(table: pd.DataFrame):
     long = table.melt(id_vars=["location_id", "date"], value_vars=["temperature_mean_c", "nasa_temperature_mean_c"], var_name="provider", value_name="temperature_c")
-    fig, ax = plt.subplots(figsize=(8.4, 4.6))
-    sns.lineplot(data=long, x="date", y="temperature_c", hue="provider", units="location_id", estimator=None, ax=ax)
-    ax.set(xlabel="UTC date", ylabel="Mean temperature (°C)", title="Modeled temperature source comparison")
-    fig.autofmt_xdate()
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.7))
+    sns.lineplot(data=long, x="date", y="temperature_c", hue="provider", units="location_id", estimator=None, ax=axes[0])
+    axes[0].set(xlabel="UTC date", ylabel="Mean temperature (°C)", title="Daily modeled temperatures")
+    sns.scatterplot(data=table, x="nasa_temperature_mean_c", y="temperature_mean_c", hue="location_id", ax=axes[1])
+    low = min(table["temperature_mean_c"].min(), table["nasa_temperature_mean_c"].min())
+    high = max(table["temperature_mean_c"].max(), table["nasa_temperature_mean_c"].max())
+    axes[1].plot([low, high], [low, high], color="#777", linestyle="--", label="equal estimates")
+    axes[1].set(xlabel="NASA POWER mean temperature (°C)", ylabel="Open-Meteo mean temperature (°C)", title="Paired estimate agreement")
+    fig.autofmt_xdate(rotation=25)
     fig.tight_layout()
     return fig
 
 
 def build_solar_seasonal(table: pd.DataFrame):
-    fig, ax = plt.subplots(figsize=(8.4, 4.6))
-    sns.boxplot(data=table, x="month", y="nasa_solar_radiation_kwh_m2_day", ax=ax)
-    ax.set(xlabel="Calendar month", ylabel="NASA POWER solar radiation (kWh/m²/day)", title="Seasonal solar radiation at selected sample points")
+    solar = "nasa_solar_radiation_kwh_m2_day"
+    monthly = table.groupby(["location_id", "month"], as_index=False).agg(solar_mean=(solar, "mean"), valid_days=(solar, "count"))
+    matrix = monthly.pivot(index="location_id", columns="month", values="solar_mean")
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.7))
+    sns.lineplot(data=monthly, x="month", y="solar_mean", hue="location_id", marker="o", ax=axes[0])
+    axes[0].set(xlabel="Calendar month", ylabel="Mean kWh/m²/day", title="Monthly means")
+    sns.boxplot(data=table, x="month", y=solar, ax=axes[1])
+    axes[1].set(xlabel="Calendar month", ylabel="Daily kWh/m²/day", title="Daily distribution")
+    sns.heatmap(matrix, annot=True, fmt=".1f", cmap="YlOrBr", ax=axes[2], cbar_kws={"label": "kWh/m²/day"})
+    axes[2].set(xlabel="Calendar month", ylabel="Sample location", title="Monthly mean by point")
     fig.tight_layout()
     return fig
 
@@ -227,14 +239,25 @@ def build_multi_correlation(table: pd.DataFrame):
 def build_solar_map(table: pd.DataFrame):
     center = [float(table.latitude.mean()), float(table.longitude.mean())]
     map_obj = folium.Map(location=center, zoom_start=6, tiles="OpenStreetMap", control_scale=True)
-    layer = folium.FeatureGroup(name="NASA POWER solar radiation (kWh/m²/day)")
+    locations = folium.FeatureGroup(name="Sample locations and source status")
+    solar_layer = folium.FeatureGroup(name="NASA POWER solar radiation (kWh/m²/day)")
+    temperature_layer = folium.FeatureGroup(name="Open-Meteo mean temperature (°C)")
+    rain_layer = folium.FeatureGroup(name="Open-Meteo mean rainfall (mm/day)")
     for row in table.itertuples():
         temperature = f"{row.temperature_mean_c:.1f} °C" if pd.notna(row.temperature_mean_c) else "unavailable"
         rainfall = f"{row.precipitation_mean_mm_day:.1f} mm/day" if pd.notna(row.precipitation_mean_mm_day) else "unavailable"
-        popup = f"<b>{html.escape(row.location_name)}</b><br>NASA solar: {row.solar_mean:.2f} kWh/m²/day<br>Open-Meteo temperature: {temperature}<br>Open-Meteo rainfall: {rainfall}<br>{row.valid_days} paired dates<br>{html.escape(row.source_status)}"
-        folium.Marker([row.latitude, row.longitude], popup=popup, tooltip=row.location_name).add_to(layer)
-        folium.CircleMarker([row.latitude, row.longitude], radius=max(5, min(22, 4 + 2 * row.solar_mean)), color="#e49a26", fill=True, fill_opacity=0.6, popup=popup).add_to(layer)
-    layer.add_to(map_obj)
+        solar = f"{row.solar_mean:.2f} kWh/m²/day" if pd.notna(row.solar_mean) else "unavailable"
+        popup = f"<b>{html.escape(row.location_name)}</b><br>NASA solar: {solar}<br>Open-Meteo temperature: {temperature}<br>Open-Meteo rainfall: {rainfall}<br>{row.valid_days} paired / {row.primary_days} primary dates<br>{html.escape(row.source_status)}"
+        coordinate = [row.latitude, row.longitude]
+        folium.Marker(coordinate, popup=popup, tooltip=row.location_name).add_to(locations)
+        if pd.notna(row.solar_mean):
+            folium.CircleMarker(coordinate, radius=max(5, min(22, 4 + 2 * row.solar_mean)), color="#e49a26", fill=True, fill_opacity=0.6, popup=popup).add_to(solar_layer)
+        if pd.notna(row.temperature_mean_c):
+            folium.CircleMarker(coordinate, radius=max(5, min(22, 3 + row.temperature_mean_c / 3)), color="#c74640", fill=True, fill_opacity=0.55, popup=popup).add_to(temperature_layer)
+        if pd.notna(row.precipitation_mean_mm_day):
+            folium.CircleMarker(coordinate, radius=max(5, min(22, 4 + row.precipitation_mean_mm_day / 2)), color="#2677a7", fill=True, fill_opacity=0.55, popup=popup).add_to(rain_layer)
+    for layer in (locations, solar_layer, temperature_layer, rain_layer):
+        layer.add_to(map_obj)
     folium.LayerControl(collapsed=False).add_to(map_obj)
     return map_obj.get_root().render()
 

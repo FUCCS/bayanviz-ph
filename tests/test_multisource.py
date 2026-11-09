@@ -148,3 +148,44 @@ def test_existing_openmeteo_analysis_still_works_without_nasa():
     header = {"X-Session-Id": sid}
     assert client.post("/api/analysis", headers=header, json={"chart_id": "map"}).status_code == 200
     assert client.post("/api/analysis", headers=header, json={"chart_id": "temp_solar", "source": "session"}).status_code == 422
+
+
+def test_uploaded_nasa_json_keeps_provenance_and_merges(monkeypatch):
+    weather, _, _, _ = provider_frames()
+
+    async def fake_weather(*_args):
+        return weather, [], 0
+
+    monkeypatch.setattr("app.main.fetch_weather", fake_weather)
+    sid = client.post("/api/session").json()["session_id"]
+    header = {"X-Session-Id": sid}
+    payload = {"header": {"api": {"version": "uploaded-fixture"}, "time_standard": "UTC", "fill_value": -999}, "geometry": {"coordinates": [123.308, 9.306]}, "parameters": {"ALLSKY_SFC_SW_DWN": {"units": "kW-hr/m^2/day"}, "T2M": {"units": "C"}}, "properties": {"parameter": {"ALLSKY_SFC_SW_DWN": {"20200101": 4, "20200102": 5, "20200103": 6}, "T2M": {"20200101": 24, "20200102": 25, "20200103": 26}}}}
+    upload = client.post("/api/upload/preview", headers=header, files={"file": ("power.json", json.dumps(payload), "application/json")})
+    assert upload.status_code == 200, upload.text
+    assert upload.json()["detected_nasa"]["time_standard"] == "UTC"
+    validated = client.post("/api/multisource/validate", headers=header, json={"locations": ["dumaguete"], "start_date": "2020-01-01", "end_date": "2020-01-04", "nasa_upload_id": upload.json()["upload_id"], "nasa_mapping": {"location_id": "location_id", "date": "date", "nasa_solar_radiation": "nasa_solar_radiation", "nasa_temperature_mean_c": "nasa_temperature_mean_c"}})
+    assert validated.status_code == 200, validated.text
+    assert validated.json()["report"]["secondary_origin"] == "user-upload"
+    assert "not authenticated" in validated.json()["report"]["warnings"][-1]
+    merged = client.post("/api/multisource/merge", headers=header, json={"validation_id": validated.json()["validation_id"]})
+    assert merged.status_code == 200
+    assert merged.json()["merge_quality"]["paired_solar_rows"] == 3
+
+
+def test_uploaded_tabular_secondary_requires_units_utc_and_mapping(monkeypatch):
+    weather, _, _, _ = provider_frames()
+
+    async def fake_weather(*_args):
+        return weather, [], 0
+
+    monkeypatch.setattr("app.main.fetch_weather", fake_weather)
+    sid = client.post("/api/session").json()["session_id"]
+    header = {"X-Session-Id": sid}
+    csv = "site,day,solar,temp\ndumaguete,2020-01-01,4,24\ndumaguete,2020-01-02,5,25\n"
+    upload = client.post("/api/upload/preview", headers=header, files={"file": ("nasa.csv", csv, "text/csv")}).json()
+    base = {"locations": ["dumaguete"], "start_date": "2020-01-01", "end_date": "2020-01-04", "nasa_upload_id": upload["upload_id"], "nasa_mapping": {"location_id": "site", "date": "day", "nasa_solar_radiation": "solar", "nasa_temperature_mean_c": "temp"}}
+    assert client.post("/api/multisource/validate", headers=header, json=base).status_code == 422
+    assert client.post("/api/multisource/validate", headers=header, json={**base, "nasa_solar_unit": "MJ/m^2/day", "nasa_temperature_unit": "C", "nasa_time_standard": "LST"}).status_code == 422
+    good = client.post("/api/multisource/validate", headers=header, json={**base, "nasa_solar_unit": "MJ/m^2/day", "nasa_temperature_unit": "C", "nasa_time_standard": "UTC"})
+    assert good.status_code == 200, good.text
+    assert good.json()["report"]["unit_transformation"]["conversion_factor"] == pytest.approx(1 / 3.6)
