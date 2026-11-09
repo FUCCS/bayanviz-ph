@@ -12,7 +12,12 @@ export async function request(path:string, session:string, options:RequestInit={
   const response = await fetch(API + path, {...options,headers})
   if (!response.ok) {
     const body = await response.json().catch(()=>({detail:response.statusText}))
-    throw new Error(typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail || body))
+    const detail = body.detail || body
+    if (typeof detail === 'object' && detail && 'message' in detail) {
+      const errors = Array.isArray(detail.errors) ? detail.errors.join('; ') : ''
+      throw new Error(`${detail.message}${errors ? ': ' + errors : ''}`)
+    }
+    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
   }
   return response.json()
 }

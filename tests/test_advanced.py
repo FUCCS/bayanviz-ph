@@ -107,3 +107,44 @@ def test_openmeteo_hourly_aggregation_and_sunshine_units(monkeypatch):
     assert frame.relative_humidity_mean_pct.iloc[0] == 70
     assert VARIABLES["sunshine_duration_hours"] == "sunshine_duration"
     assert HOURLY_VARIABLES["relative_humidity_mean_pct"] == "relative_humidity_2m"
+
+
+def test_long_weather_fetch_uses_complete_bounded_chunks(monkeypatch):
+    from app import connectors
+
+    weather_cache.clear()
+    requested = []
+
+    class Response:
+        def __init__(self, params):
+            self.params = params
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            days = pd.date_range(self.params["start_date"], self.params["end_date"])
+            return {"daily": {"time": days.strftime("%Y-%m-%d").tolist(),
+                              "temperature_2m_mean": [25.0] * len(days)},
+                    "daily_units": {"temperature_2m_mean": "°C"}}
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, _url, params):
+            requested.append((params["start_date"], params["end_date"]))
+            return Response(params)
+
+    monkeypatch.setattr(connectors.httpx, "AsyncClient", Client)
+    frame, errors, hits = asyncio.run(fetch_weather(["dumaguete"], pd.Timestamp("2024-01-01").date(), pd.Timestamp("2025-12-31").date(), ["temperature_mean_c"], "UTC"))
+    assert not errors and hits == 0 and len(frame) == 731
+    assert len(requested) == 3
+    assert max((pd.Timestamp(end) - pd.Timestamp(start)).days for start, end in requested) <= 364
+    assert not frame.duplicated(["location_id", "date"]).any()

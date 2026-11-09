@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import httpx
 import numpy as np
@@ -41,6 +41,25 @@ async def fetch_weather(location_ids: list[str], start: date, end: date, variabl
         return (pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(),
                 [error for _, errors, _ in parts for error in errors],
                 sum(hits for _, _, hits in parts))
+    if (end - start).days >= 365:
+        # Large archive queries can time out upstream. A failed year must not
+        # quietly turn a requested ten-year dataset into a partial series.
+        chunks = []
+        errors = []
+        cache_hits = 0
+        chunk_start = start
+        while chunk_start <= end:
+            chunk_end = min(end, chunk_start + timedelta(days=364))
+            frame, chunk_errors, hits = await fetch_weather(location_ids, chunk_start, chunk_end, variables, timezone_name)
+            if frame.empty or chunk_errors:
+                errors.extend(chunk_errors or [f"{location_ids[0]}: no data for {chunk_start} to {chunk_end}"])
+            else:
+                chunks.append(frame)
+                cache_hits += hits
+            chunk_start = chunk_end + timedelta(days=1)
+        if errors:
+            return pd.DataFrame(), errors, cache_hits
+        return pd.concat(chunks, ignore_index=True), [], cache_hits
     now = time.monotonic()
     for key, (expiry, _) in list(weather_cache.items()):
         if expiry <= now:
@@ -62,7 +81,7 @@ async def fetch_weather(location_ids: list[str], start: date, end: date, variabl
                 params["daily"] = ",".join(VARIABLES[name] for name in daily_selected)
             if hourly_selected:
                 params["hourly"] = ",".join(HOURLY_VARIABLES[name] for name in hourly_selected)
-            for attempt in range(2):
+            for attempt in range(3):
                 try:
                     response = await client.get(ARCHIVE_URL, params=params)
                     response.raise_for_status()
@@ -101,10 +120,18 @@ async def fetch_weather(location_ids: list[str], start: date, end: date, variabl
                     weather_cache[cache_key] = (time.monotonic() + WEATHER_CACHE_TTL, frame.copy())
                     break
                 except (httpx.HTTPError, KeyError, ValueError) as exc:
-                    if attempt == 1:
-                        errors.append(f"{key}: {type(exc).__name__}")
+                    permanent = isinstance(exc, httpx.HTTPStatusError) and 400 <= exc.response.status_code < 500 and exc.response.status_code != 429
+                    if attempt == 2 or permanent:
+                        if isinstance(exc, httpx.HTTPStatusError):
+                            try:
+                                reason = str(exc.response.json().get("reason", ""))[:180]
+                            except (ValueError, AttributeError):
+                                reason = ""
+                            errors.append(f"{key}: Open-Meteo HTTP {exc.response.status_code}" + (f" — {reason}" if reason else ""))
+                        else:
+                            errors.append(f"{key}: {type(exc).__name__}: {str(exc)[:180]}")
                     else:
-                        await asyncio.sleep(0.5 * 2**attempt)
+                        await asyncio.sleep(1.5 * 2**attempt)
     result = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     return result, errors, cache_hits
 
