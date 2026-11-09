@@ -23,6 +23,56 @@ weather_cache: dict[tuple[str, str, str, tuple[str, ...], str], tuple[float, pd.
 nasa_cache: dict[tuple[str, str, str, tuple[str, ...]], tuple[float, pd.DataFrame, dict]] = {}
 
 
+def parse_weather_payload(payload: dict, key: str, selected: tuple[str, ...], timezone_name: str, start: date, end: date) -> pd.DataFrame:
+    """Validate and normalize one Open-Meteo response, including browser-relayed responses."""
+    if not isinstance(payload, dict) or key not in LOCATIONS:
+        raise ValueError("Open-Meteo returned an invalid response or location")
+    if timezone_name == "UTC" and payload.get("utc_offset_seconds") not in (None, 0):
+        raise ValueError("Open-Meteo returned non-UTC daily dates")
+    latitude, longitude = payload.get("latitude"), payload.get("longitude")
+    loc = LOCATIONS[key]
+    if not isinstance(latitude, (int, float)) or not isinstance(longitude, (int, float)) or abs(latitude - loc["latitude"]) > 0.75 or abs(longitude - loc["longitude"]) > 0.75:
+        raise ValueError("Open-Meteo grid coordinates do not match the requested location")
+    daily = payload.get("daily", {})
+    hourly = payload.get("hourly", {})
+    if not isinstance(daily, dict) or not isinstance(hourly, dict):
+        raise ValueError("Open-Meteo returned invalid daily or hourly arrays")
+    daily_selected = [name for name in selected if name in VARIABLES]
+    hourly_selected = [name for name in selected if name in HOURLY_VARIABLES]
+    stamps = hourly.get("time", [])
+    if hourly_selected and (not isinstance(stamps, list) or any(not isinstance(stamp, str) for stamp in stamps)):
+        raise ValueError("Open-Meteo returned invalid hourly dates")
+    dates = daily.get("time") if daily_selected else daily.get("time") or sorted({stamp[:10] for stamp in stamps})
+    expected_dates = pd.date_range(start, end).strftime("%Y-%m-%d").tolist()
+    if not isinstance(dates, list) or dates != expected_dates or any(name not in daily or not isinstance(daily[name], list) or len(daily[name]) != len(dates) for name in (VARIABLES[var] for var in daily_selected)):
+        raise ValueError("Open-Meteo returned incomplete daily dates or arrays")
+    units = payload.get("daily_units", {})
+    for name in selected:
+        provider = VARIABLES.get(name) or HOURLY_VARIABLES[name]
+        reported = (units if name in VARIABLES else payload.get("hourly_units", {})).get(provider)
+        if reported != EXPECTED_UNITS[name]:
+            raise ValueError(f"Open-Meteo returned unexpected units for {name}")
+    frame = pd.DataFrame({"location_id": key, "date": dates, "model": "era5"})
+    for name in daily_selected:
+        values = pd.to_numeric(pd.Series(daily[VARIABLES[name]]), errors="coerce")
+        frame[name] = values / 3600 if name == "sunshine_duration_hours" else values
+    if hourly_selected:
+        if not isinstance(stamps, list) or len(stamps) != len(dates) * 24 or any(HOURLY_VARIABLES[name] not in hourly or len(hourly[HOURLY_VARIABLES[name]]) != len(stamps) for name in hourly_selected):
+            raise ValueError("Open-Meteo returned incomplete hourly arrays")
+        hourly_frame = pd.DataFrame({"date": [stamp[:10] for stamp in stamps]})
+        if hourly_frame.groupby("date").size().reindex(dates, fill_value=0).ne(24).any():
+            raise ValueError("Open-Meteo returned incomplete hourly dates")
+        for name in hourly_selected:
+            hourly_frame[name] = pd.to_numeric(pd.Series(hourly[HOURLY_VARIABLES[name]]), errors="coerce")
+        frame = frame.merge(hourly_frame.groupby("date", as_index=False)[hourly_selected].mean(), on="date", how="left", validate="one_to_one")
+    frame["analysis_time_standard"] = timezone_name
+    frame["openmeteo_grid_latitude"] = latitude
+    frame["openmeteo_grid_longitude"] = longitude
+    frame["openmeteo_dataset_version"] = "ERA5"
+    frame.attrs["provider_units"] = {name: (units if name in VARIABLES else payload.get("hourly_units", {})).get(VARIABLES.get(name) or HOURLY_VARIABLES.get(name)) for name in selected}
+    return frame
+
+
 async def fetch_weather(location_ids: list[str], start: date, end: date, variables: list[str] | None = None, timezone_name: str = "Asia/Manila") -> tuple[pd.DataFrame, list[str], int]:
     if not location_ids or len(location_ids) > 3 or any(key not in LOCATIONS for key in location_ids):
         raise ValueError("Choose one to three registered locations")
@@ -86,34 +136,7 @@ async def fetch_weather(location_ids: list[str], start: date, end: date, variabl
                     response = await client.get(ARCHIVE_URL, params=params)
                     response.raise_for_status()
                     payload = response.json()
-                    daily = payload.get("daily", {})
-                    hourly = payload.get("hourly", {})
-                    dates = daily.get("time") or sorted({stamp[:10] for stamp in hourly.get("time", [])})
-                    if not isinstance(dates, list) or not dates or any(name not in daily or not isinstance(daily[name], list) or len(daily[name]) != len(dates) for name in (VARIABLES[var] for var in daily_selected)):
-                        raise ValueError("Open-Meteo returned incomplete daily arrays")
-                    units = payload.get("daily_units", {})
-                    for name in selected:
-                        provider = VARIABLES.get(name) or HOURLY_VARIABLES[name]
-                        reported = (units if name in VARIABLES else payload.get("hourly_units", {})).get(provider)
-                        if reported != EXPECTED_UNITS[name]:
-                            raise ValueError(f"Open-Meteo returned unexpected units for {name}")
-                    frame = pd.DataFrame({"location_id": key, "date": dates, "model": "era5"})
-                    for name in daily_selected:
-                        values = pd.to_numeric(pd.Series(daily[VARIABLES[name]]), errors="coerce")
-                        frame[name] = values / 3600 if name == "sunshine_duration_hours" else values
-                    if hourly_selected:
-                        stamps = hourly.get("time", [])
-                        if not stamps or any(HOURLY_VARIABLES[name] not in hourly or len(hourly[HOURLY_VARIABLES[name]]) != len(stamps) for name in hourly_selected):
-                            raise ValueError("Open-Meteo returned incomplete hourly arrays")
-                        hourly_frame = pd.DataFrame({"date": [stamp[:10] for stamp in stamps]})
-                        for name in hourly_selected:
-                            hourly_frame[name] = pd.to_numeric(pd.Series(hourly[HOURLY_VARIABLES[name]]), errors="coerce")
-                        frame = frame.merge(hourly_frame.groupby("date", as_index=False)[hourly_selected].mean(), on="date", how="left", validate="one_to_one")
-                    frame["analysis_time_standard"] = timezone_name
-                    frame["openmeteo_grid_latitude"] = payload.get("latitude")
-                    frame["openmeteo_grid_longitude"] = payload.get("longitude")
-                    frame["openmeteo_dataset_version"] = "ERA5"
-                    frame.attrs["provider_units"] = {name: (units if name in VARIABLES else payload.get("hourly_units", {})).get(VARIABLES.get(name) or HOURLY_VARIABLES.get(name)) for name in selected}
+                    frame = parse_weather_payload(payload, key, selected, timezone_name, start, end)
                     frames.append(frame)
                     while len(weather_cache) >= CACHE_MAX_ENTRIES:
                         weather_cache.pop(next(iter(weather_cache)))

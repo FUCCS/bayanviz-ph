@@ -93,7 +93,7 @@ def test_openmeteo_hourly_aggregation_and_sunshine_units(monkeypatch):
         def raise_for_status(self): pass
         def json(self):
             return {"daily": {"time": ["2025-01-01"], "sunshine_duration": [7200]}, "daily_units": {"sunshine_duration": "s"},
-                    "hourly": {"time": ["2025-01-01T00:00", "2025-01-01T01:00"], "relative_humidity_2m": [60, 80]},
+                    "hourly": {"time": [f"2025-01-01T{hour:02d}:00" for hour in range(24)], "relative_humidity_2m": [60, 80] * 12},
                     "hourly_units": {"relative_humidity_2m": "%"}, "latitude": 9.25, "longitude": 123.25}
     class Client:
         def __init__(self, *args, **kwargs): pass
@@ -126,7 +126,7 @@ def test_long_weather_fetch_uses_complete_bounded_chunks(monkeypatch):
             days = pd.date_range(self.params["start_date"], self.params["end_date"])
             return {"daily": {"time": days.strftime("%Y-%m-%d").tolist(),
                               "temperature_2m_mean": [25.0] * len(days)},
-                    "daily_units": {"temperature_2m_mean": "°C"}}
+                    "daily_units": {"temperature_2m_mean": "°C"}, "latitude": 9.25, "longitude": 123.25}
 
     class Client:
         def __init__(self, *args, **kwargs):

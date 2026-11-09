@@ -9,7 +9,7 @@ import os
 import secrets
 import time
 import zipfile
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import BinaryIO
 
@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from .catalog import LOCATIONS
 from .charts import PALETTE, REGISTRY as CHARTS, code_for, interpretation, prepare_chart, render_chart
-from .connectors import MAX_WEATHER_DAYS, fetch_nasa, fetch_weather, parse_nasa_payload
+from .connectors import HOURLY_VARIABLES, MAX_WEATHER_DAYS, VARIABLES, fetch_nasa, fetch_weather, parse_nasa_payload, parse_weather_payload
 from .multisource import MS_BUILDERS, MS_CHARTS, merge_sources, multisource_code, multisource_interpretation, normalize_nasa, prepare_multisource_chart, render_multisource_chart, validate_sources
 from .processing import ADVANCED_COLUMNS, CLIMATE_COLUMNS, SCHEMA_VERSION, MIN_PERIOD_COVERAGE, RAINY_DAY_MM, WEATHER_COLUMNS, climate_summary, date_bounds, filter_hash, filter_weather, period_table, prepare_weather, safe_number, validate_coordinates
 
@@ -62,6 +62,17 @@ class FetchRequest(BaseModel):
     start_date: date
     end_date: date
     variables: list[str] = Field(default_factory=lambda: WEATHER_COLUMNS.copy())
+
+
+class BrowserWeatherChunk(BaseModel):
+    location_id: str
+    start_date: date
+    end_date: date
+    payload: dict
+
+
+class BrowserWeatherImportRequest(FetchRequest):
+    chunks: list[BrowserWeatherChunk] = Field(min_length=1, max_length=36)
 
 
 class UseUploadRequest(BaseModel):
@@ -367,10 +378,15 @@ async def fetch(request: FetchRequest, auth=Depends(session)):
         raise HTTPException(400, str(exc)) from exc
     if frame.empty:
         raise HTTPException(502, {"message": "Provider returned no usable data", "errors": errors})
+    return save_fetched_weather(token, state, frame, errors, cache_hits, "Cached API" if cache_hits == len(request.locations) else "Live API", "Open-Meteo ERA5 API", request.variables)
+
+
+def save_fetched_weather(token: str, state: dict, frame: pd.DataFrame, errors: list[str], cache_hits: int, status: str, source: str, variables: list[str]) -> dict:
     cleaned = prepare_weather(frame)
     state["api_weather"] = cleaned.copy()
+    state["api_variables"] = set(variables)
     state["weather"] = cleaned
-    state["weather_source"] = "Open-Meteo ERA5 API"
+    state["weather_source"] = source
     state["retrieved_at"] = datetime.now(timezone.utc).isoformat()
     state["multisource"] = None
     state["merged"] = None
@@ -379,7 +395,43 @@ async def fetch(request: FetchRequest, auth=Depends(session)):
         if value["session_id"] == token:
             del results[key]
     bounds = date_bounds(cleaned)
-    return {"status": "Cached API" if cache_hits == len(request.locations) else "Live API", "records": len(cleaned), "errors": errors, "cache_hits": cache_hits, "preview": json.loads(cleaned.head(8).to_json(orient="records", date_format="iso")), "retrieved_at": state["retrieved_at"], "observation_period": [bounds["min_date"], bounds["max_date"]], "locations": bounds["locations"], "variables": [name for name in CLIMATE_COLUMNS if cleaned[name].notna().any()], "schema_version": SCHEMA_VERSION}
+    return {"status": status, "records": len(cleaned), "errors": errors, "cache_hits": cache_hits, "preview": json.loads(cleaned.head(8).to_json(orient="records", date_format="iso")), "retrieved_at": state["retrieved_at"], "observation_period": [bounds["min_date"], bounds["max_date"]], "locations": bounds["locations"], "variables": [name for name in CLIMATE_COLUMNS if cleaned[name].notna().any()], "schema_version": SCHEMA_VERSION}
+
+
+@app.post("/api/fetch/weather/browser")
+def fetch_from_browser(request: BrowserWeatherImportRequest, auth=Depends(session)):
+    """Accept a complete browser-relayed archive response after server-side validation."""
+    token, state = auth
+    if len(state["requests"]) >= 12:
+        raise HTTPException(429, "Session request limit reached")
+    state["requests"].append(time.time())
+    selected = tuple(sorted(set(request.variables)))
+    if not selected or set(selected) - set(VARIABLES) - set(HOURLY_VARIABLES):
+        raise HTTPException(400, "Choose supported climate variables")
+    if any(key not in LOCATIONS for key in request.locations) or len(set(request.locations)) != len(request.locations):
+        raise HTTPException(400, "Choose distinct registered locations")
+    if request.end_date < request.start_date or (request.end_date - request.start_date).days >= MAX_WEATHER_DAYS or request.end_date >= date.today():
+        raise HTTPException(400, "Choose up to 3,653 historical weather days ending before today")
+    if set(selected) & set(HOURLY_VARIABLES) and (request.end_date - request.start_date).days > 366:
+        raise HTTPException(400, "Hourly-derived daily fields are limited to 367 days")
+    expected = set()
+    for key in request.locations:
+        chunk_start = request.start_date
+        while chunk_start <= request.end_date:
+            chunk_end = min(request.end_date, chunk_start + timedelta(days=364))
+            expected.add((key, chunk_start, chunk_end))
+            chunk_start = chunk_end + timedelta(days=1)
+    actual = {(part.location_id, part.start_date, part.end_date) for part in request.chunks}
+    if len(actual) != len(request.chunks) or actual != expected:
+        raise HTTPException(400, "Browser relay must include every requested location and date chunk exactly once")
+    try:
+        frames = [parse_weather_payload(part.payload, part.location_id, selected, "UTC", part.start_date, part.end_date) for part in request.chunks]
+        combined = pd.concat(frames, ignore_index=True)
+        if combined.duplicated(["location_id", "date"]).any():
+            raise ValueError("Browser relay contains duplicate location/date keys")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(422, f"Browser-relayed Open-Meteo data failed validation: {exc}") from exc
+    return save_fetched_weather(token, state, combined, [], 0, "Browser API relay", "Open-Meteo ERA5 API (browser-relayed, validated)", request.variables)
 
 
 @app.post("/api/multisource/validate")
@@ -421,7 +473,16 @@ async def multisource_validate(request: MultiValidateRequest, auth=Depends(sessi
         if request.weather_source == "upload":
             weather_task = asyncio.sleep(0, result=(state["primary_weather"], [], 0))
         else:
-            weather_task = fetch_weather(request.locations, request.start_date, request.end_date, request.weather_variables, "UTC")
+            cached_weather = state.get("api_weather")
+            dates = pd.date_range(request.start_date, request.end_date)
+            selected_weather = cached_weather[cached_weather.location_id.isin(request.locations) & cached_weather.date.isin(dates)] if cached_weather is not None else None
+            has_complete_weather = (
+                selected_weather is not None
+                and set(request.weather_variables).issubset(state.get("api_variables", set()))
+                and len(selected_weather) == len(request.locations) * len(dates)
+                and not selected_weather.duplicated(["location_id", "date"]).any()
+            )
+            weather_task = asyncio.sleep(0, result=(selected_weather, [], len(request.locations))) if has_complete_weather else fetch_weather(request.locations, request.start_date, request.end_date, request.weather_variables, "UTC")
         weather_result, nasa_result = await asyncio.gather(weather_task, nasa_task)
         weather, weather_errors, weather_hits = weather_result
         nasa_raw, metadata, nasa_errors, nasa_hits = nasa_result
@@ -534,11 +595,11 @@ def parse_upload(name: str, content: BinaryIO | bytes) -> pd.DataFrame:
             if not isinstance(coordinates, list) or len(coordinates) < 2:
                 raise ValueError("NASA JSON needs point coordinates for location matching")
             lon, lat = coordinates[:2]
-            if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+            if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)) or pd.isna(lat) or pd.isna(lon):
                 raise ValueError("NASA JSON has invalid point coordinates")
             nearby = min(LOCATIONS.values(), key=lambda loc: (loc["latitude"] - lat)**2 + (loc["longitude"] - lon)**2)
-            if (nearby["latitude"] - lat)**2 + (nearby["longitude"] - lon)**2 >= 0.02:
-                raise ValueError("NASA JSON point is not close to a registered location")
+            if abs(nearby["latitude"] - lat) > 0.75 or abs(nearby["longitude"] - lon) > 0.75:
+                raise ValueError("NASA JSON point is more than 0.75° from every registered location; use a matching sampling point or a CSV with registered location_id")
             available_parameters = payload["properties"].get("parameter", {})
             selected = tuple(name for name, code in (("solar_radiation", "ALLSKY_SFC_SW_DWN"), ("nasa_temperature_mean_c", "T2M"), ("nasa_relative_humidity_pct", "RH2M"), ("nasa_wind_speed_m_s", "WS10M")) if code in available_parameters)
             if "solar_radiation" not in selected:
@@ -572,8 +633,14 @@ def parse_upload(name: str, content: BinaryIO | bytes) -> pd.DataFrame:
                 if columns:
                     frame = frame.merge(hours.groupby("date", as_index=False)[columns].mean(), on="date", how="left", validate="one_to_one")
             lat, lon = payload.get("latitude"), payload.get("longitude")
-            nearby = min(LOCATIONS.values(), key=lambda loc: (loc["latitude"] - lat)**2 + (loc["longitude"] - lon)**2) if isinstance(lat, (int, float)) and isinstance(lon, (int, float)) else None
-            frame["location_id"] = nearby["id"] if nearby and (nearby["latitude"] - lat)**2 + (nearby["longitude"] - lon)**2 < 0.02 else "uploaded_point"
+            if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)) or pd.isna(lat) or pd.isna(lon):
+                raise ValueError("Open-Meteo JSON needs numeric latitude and longitude to match a registered location")
+            nearby = min(LOCATIONS.values(), key=lambda loc: (loc["latitude"] - lat)**2 + (loc["longitude"] - lon)**2)
+            if abs(nearby["latitude"] - lat) > 0.75 or abs(nearby["longitude"] - lon) > 0.75:
+                raise ValueError("Open-Meteo JSON point is more than 0.75° from every registered location; use a matching sampling point or a CSV with registered location_id")
+            frame["location_id"] = nearby["id"]
+            frame["latitude"] = lat
+            frame["longitude"] = lon
             frame["model"] = "era5" if "era5" in str(payload.get("model", "")).lower() else "uploaded_model_unspecified"
             return frame
         return pd.DataFrame(payload if isinstance(payload, list) else payload.get("data", []))

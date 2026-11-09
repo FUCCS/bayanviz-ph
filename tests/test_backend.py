@@ -200,6 +200,12 @@ def test_open_meteo_json_adapter():
     clean = prepare_weather(parse_upload("weather.json", json.dumps(data).encode()))
     assert clean.iloc[0].location_id == "dumaguete"
     assert clean.iloc[0].wind_speed_max_kmh == 18
+    assert clean.iloc[0].latitude == 9.31
+    wider_grid = {**data, "latitude": 9.55, "longitude": 123.5}
+    assert parse_upload("weather.json", json.dumps(wider_grid).encode()).iloc[0].location_id == "dumaguete"
+    remote_point = {**data, "latitude": 1.0, "longitude": 1.0}
+    with pytest.raises(ValueError, match="registered location"):
+        parse_upload("weather.json", json.dumps(remote_point).encode())
 
 
 def test_api_fetch_populates_selectable_dataset(monkeypatch):
