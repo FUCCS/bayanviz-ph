@@ -1,8 +1,6 @@
 # BayanViz PH
 
-Philippine Historical Climate Data Analytics. Subtitle: Advanced Data Visualization and Geographic Analysis.
-
-This educational demonstration follows Chapter 08 (Advanced Data Visualization) and Chapter 09 (Map Data Analysis) of the supplied training presentation. It is not an official KOICA service.
+Philippine historical climate analytics for the Chapter 08 and Chapter 09 training exercises. This is an educational project, not an official KOICA service.
 
 ## Run locally
 
@@ -12,29 +10,25 @@ Use Python 3.14 for the pinned visualization dependencies:
     .venv/bin/python -m pip install -r backend/requirements-dev.txt
     MPLCONFIGDIR=/tmp/bayanviz-mpl .venv/bin/uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
 
-In a second terminal:
+In another terminal:
 
     cd frontend
     npm ci
     npm run dev
 
-Open http://127.0.0.1:5173. For a hosted backend, set VITE_API_BASE_URL to its verified HTTPS origin.
+Open http://127.0.0.1:5173. For hosting, set `VITE_API_BASE_URL` to the backend HTTPS origin.
 
-The checked-in real ERA5 snapshot contains 3,655 daily rows for five representative Visayas sample points in 2024–2025. It is partial geographic and temporal coverage, not a nationwide dataset or province-wide mean. The offline weather ingestion script supports the 2010–2025 study period for the registered points. Expand and validate the location registry before making nationwide claims.
+## Use your own source data
+
+No observations are bundled or loaded by default. Open **Dataset Upload**, choose a weather CSV, Parquet, or supported Open-Meteo JSON file, map its columns, declare UTC daily dates, and click **Use Dataset**. The required weather columns are `location_id`, `date`, and `model`; provide at least one of `temperature_mean_c`, `temperature_min_c`, `temperature_max_c`, `precipitation_mm`, or `wind_speed_max_kmh`. Units are °C, mm, and km/h. The header-only template is in `frontend/public/weather-template.csv`.
+
+For paired analyses, open **Multi-Source Manager** and upload a NASA POWER JSON download or compatible solar CSV/Parquet. Map `location_id`, `date`, and `nasa_solar_radiation`; optional `nasa_temperature_mean_c` supports temperature comparison. Declare the source-reported units and UTC daily standard, then validate and merge. The app matches exact location/date keys, reports missing and unmatched records, and keeps absent secondary values missing. No external climate API call is made during this workflow.
+
+Uploads are limited to 5 MB, 50,000 rows, 60 columns, and three files per anonymous session by default. Uploaded files and analysis results are kept in process memory for three hours and vanish after a backend restart. The location IDs must match `data/reference/locations.json`; the five registered coordinates are point locations, not province-wide averages. The application cannot infer national coverage from these locations.
 
 ## Test
 
     MPLCONFIGDIR=/tmp/bayanviz-mpl .venv/bin/python -m pytest -q
-    cd frontend && npm run test && npm run build
+    cd frontend && npm test -- --run && npm run build
 
-Use the Overview date-range controls to select dates within the loaded dataset, choose a sample location or Negros Oriental, and Apply Filters. The eight climate KPI cards, Chapter 08 visualizations, two relationship plots, and Chapter 09 Folium map use the selected weather rows. Each chart exposes its actual Python builder, deterministic interpretation, evidence, and reproduction package. API Sources fetches bounded Open-Meteo periods; Dataset Upload accepts compatible CSV, Parquet, or weather JSON in a private session.
-
-Multi-Source Manager adds live Open-Meteo ERA5 and NASA POWER daily retrieval, UTC compatibility validation, a one-to-one left merge, source comparison, six paired-source charts/maps, source manifests, and quality reports. A separate analysis date range reruns paired calculations on filtered observations. The original Asia/Manila analytics and upload path remain available. A NASA POWER JSON download or compatible CSV/Parquet file may be mapped as the secondary source; tabular uploads require explicit units and UTC declaration and are labeled unverified. The live manager currently uses registered sample points, up to three locations and 367 dates per request; full-period integrated datasets require a separate bounded retrieval workflow.
-
-The five-point snapshot is a presentation fallback. The API is limited to three points and 367 days per visitor request. The full 2010–2025 period is prepared separately with:
-
-    .venv/bin/python scripts/fetch_weather.py --start 2010-01-01 --end 2025-12-31
-
-Review provider terms and quotas before a bulk fetch. Matplotlib uses the noninteractive Agg backend and a rendering lock. Plotly figures are generated in Python; Folium uses OpenStreetMap only for background tiles. Session uploads and results expire after three hours and disappear on restart.
-
-See docs for course mapping, data definitions, source coverage, deployment, and a demonstration walkthrough.
+See `docs/` for source definitions, deployment, and the demonstration guide.

@@ -27,8 +27,8 @@ PALETTE = {"rainy": "#1f7fa8", "dry": "#e2a548"}
 def build_bar(table: pd.DataFrame):
     fig, ax = plt.subplots(figsize=(9, 5))
     sns.barplot(data=table, x="month", y="average_monthly_mm", hue="location_name", errorbar=None, ax=ax)
-    ax.set(xlabel="Month", ylabel="Average complete-month precipitation total (mm)", title="Monthly rainfall at sample locations")
-    ax.legend(title="Sample location", bbox_to_anchor=(1.01, 1), loc="upper left")
+    ax.set(xlabel="Month", ylabel="Average complete-month precipitation total (mm)", title="Monthly rainfall at uploaded locations")
+    ax.legend(title="Location", bbox_to_anchor=(1.01, 1), loc="upper left")
     fig.tight_layout()
     return fig
 
@@ -42,8 +42,8 @@ def build_line(table: pd.DataFrame):
     stride = max(1, len(ticks) // 10)
     ticks = ticks.iloc[::stride]
     ax.set_xticks(ticks.period_index, ticks.period, rotation=35)
-    ax.set(xlabel="Observation period", ylabel=f"{variable.replace('_', ' ').title()} ({unit})", title="Historical climate trend at sample points")
-    ax.legend(title="Sample location", bbox_to_anchor=(1.01, 1), loc="upper left")
+    ax.set(xlabel="Observation period", ylabel=f"{variable.replace('_', ' ').title()} ({unit})", title="Historical climate trend at uploaded points")
+    ax.legend(title="Location", bbox_to_anchor=(1.01, 1), loc="upper left")
     fig.tight_layout()
     return fig
 
@@ -53,7 +53,7 @@ def build_box(table: pd.DataFrame):
     variable = str(table.variable.iloc[0])
     unit = "mm" if variable == "precipitation_mm" else "km/h" if variable == "wind_speed_max_kmh" else "°C"
     sns.boxplot(data=table, x="location_name", y="measure_value", color="#5d9fba", ax=ax)
-    ax.set(xlabel="Sample location", ylabel=f"Daily {variable.replace('_', ' ')} ({unit})", title="Daily climate distribution")
+    ax.set(xlabel="Location", ylabel=f"Daily {variable.replace('_', ' ')} ({unit})", title="Daily climate distribution")
     ax.tick_params(axis="x", rotation=20)
     fig.tight_layout()
     return fig
@@ -81,7 +81,7 @@ def build_heatmap(table: pd.DataFrame):
     grid = table.pivot_table(index="location_name", columns="month", values="average_monthly_mm", aggfunc="first")
     fig, ax = plt.subplots(figsize=(9, 4.8))
     sns.heatmap(grid, cmap="YlGnBu", annot=True, fmt=".0f", linewidths=0.4, cbar_kws={"label": "Average complete-month total (mm)"}, ax=ax)
-    ax.set(xlabel="Month", ylabel="Sample location", title="Seasonal rainfall patterns")
+    ax.set(xlabel="Month", ylabel="Location", title="Seasonal rainfall patterns")
     fig.tight_layout()
     return fig
 
@@ -90,13 +90,13 @@ def build_mosaic(table: pd.DataFrame):
     counts = {(str(row["location_name"]), str(row["condition"])): int(row["count"]) for row in table.to_dict("records")}
     fig, ax = plt.subplots(figsize=(10, 5))
     mosaic(counts, ax=ax, labelizer=lambda key: key[-1] if counts[key] >= 2 else "", properties=lambda key: {"color": PALETTE.get(key[-1], "#7294aa"), "alpha": 0.85})
-    ax.set_title("Rainy and dry observed days by sample location")
+    ax.set_title("Rainy and dry observed days by location")
     fig.tight_layout()
     return fig
 
 
 def build_treemap(table: pd.DataFrame):
-    fig = px.treemap(table, path=["region", "location_name", "month"], values="rainy_days", color="rainy_days", color_continuous_scale="Blues", title="Rainy-day observations by region, sample location, and month")
+    fig = px.treemap(table, path=["region", "location_name", "month"], values="rainy_days", color="rainy_days", color_continuous_scale="Blues", title="Rainy-day observations by region, location, and month")
     fig.update_layout(margin=dict(t=55, l=12, r=12, b=12), coloraxis_colorbar_title="Rainy days")
     return fig
 
@@ -104,7 +104,7 @@ def build_treemap(table: pd.DataFrame):
 def build_map(table: pd.DataFrame):
     center = [float(table.latitude.mean()), float(table.longitude.mean())]
     map_obj = folium.Map(location=center, zoom_start=7, tiles="OpenStreetMap", control_scale=True)
-    point_layer = folium.FeatureGroup(name="Weather sample locations", show=True)
+    point_layer = folium.FeatureGroup(name="Weather locations", show=True)
     rain_layer = folium.FeatureGroup(name="Mean daily rainfall circles", show=True)
     for row in table.itertuples():
         lat, lon = float(row.latitude), float(row.longitude)
@@ -114,7 +114,7 @@ def build_map(table: pd.DataFrame):
         radius = float(np.clip(5 + 2.5 * np.sqrt(max(rainfall, 0)), 5, 22))
         color = "red" if temp >= 28 else "orange" if temp >= 26 else "blue"
         selected_value = f"{float(row.selected_measure_value):.1f} {html.escape(str(row.selected_measure_unit))}" if pd.notna(row.selected_measure_value) else "unavailable"
-        popup = f"<b>{label}</b><br>{html.escape(str(row.province))} · ERA5 sample point<br>Selected {html.escape(str(row.selected_variable))}: {selected_value}<br>Temperature used for marker color: {temp:.1f} °C ({int(row.temperature_valid_days)} valid days)<br>Average daily rain used for circle size: {rainfall:.1f} mm ({int(row.rain_valid_days)} valid days)"
+        popup = f"<b>{label}</b><br>{html.escape(str(row.province))} · Uploaded weather point<br>Selected {html.escape(str(row.selected_variable))}: {selected_value}<br>Temperature used for marker color: {temp:.1f} °C ({int(row.temperature_valid_days)} valid days)<br>Average daily rain used for circle size: {rainfall:.1f} mm ({int(row.rain_valid_days)} valid days)"
         folium.Marker([lat, lon], popup=folium.Popup(popup, max_width=300), tooltip=label, icon=folium.Icon(color=color, icon="cloud")).add_to(point_layer)
         folium.CircleMarker([lat, lon], radius=radius, color="#0d6b9a", fill=True, fill_opacity=0.4, popup=folium.Popup(popup, max_width=300)).add_to(rain_layer)
     point_layer.add_to(map_obj)
@@ -126,13 +126,13 @@ def build_map(table: pd.DataFrame):
         map_obj.location = center
         map_obj.options["zoom"] = 10
     color_measure = str(table.selected_variable.iloc[0]) if str(table.selected_variable.iloc[0]).startswith("temperature_") else "temperature_mean_c"
-    legend = f'<div style="position:fixed;bottom:22px;left:18px;z-index:9999;background:white;padding:10px 13px;border:1px solid #b7cbd8;border-radius:7px;font:12px sans-serif;color:#163a51;box-shadow:0 2px 8px #0002"><b>Climate symbols</b><br>Marker: {html.escape(color_measure)} (&lt;26 blue, 26–&lt;28 orange, ≥28 red)<br>Circle radius: 5 + 2.5√(mean daily rainfall in mm), capped 5–22 px<br>ERA5 sample points; OSM is the background map only.</div>'
+    legend = f'<div style="position:fixed;bottom:22px;left:18px;z-index:9999;background:white;padding:10px 13px;border:1px solid #b7cbd8;border-radius:7px;font:12px sans-serif;color:#163a51;box-shadow:0 2px 8px #0002"><b>Climate symbols</b><br>Marker: {html.escape(color_measure)} (&lt;26 blue, 26–&lt;28 orange, ≥28 red)<br>Circle radius: 5 + 2.5√(mean daily rainfall in mm), capped 5–22 px<br>ERA5 uploaded points; OSM is the background map only.</div>'
     map_obj.get_root().html.add_child(folium.Element(legend))
     return map_obj.get_root().render()
 
 
 REGISTRY = {
-    "bar": ("Chapter 08", "Seaborn bar graph", "sns.barplot()", "Compare mean monthly precipitation totals at sample locations", build_bar, "weather"),
+    "bar": ("Chapter 08", "Seaborn bar graph", "sns.barplot()", "Compare mean monthly precipitation totals at locations", build_bar, "weather"),
     "line": ("Chapter 08", "Seaborn line graph", "sns.lineplot()", "Inspect daily, monthly, or annual climate trends", build_line, "weather"),
     "box": ("Chapter 08", "Seaborn box plot", "sns.boxplot()", "Compare daily climate distributions", build_box, "weather"),
     "bubble": ("Chapter 08", "Bubble chart", "sns.scatterplot()", "Explore paired temperature and rainfall; bubble area is wind speed", build_bubble, "weather"),
@@ -140,7 +140,7 @@ REGISTRY = {
     "heatmap": ("Chapter 08", "Heatmap", "pivot_table(); sns.heatmap()", "Compare seasonal precipitation patterns", build_heatmap, "weather"),
     "mosaic": ("Chapter 08", "Mosaic plot", "mosaic()", "Compare rainy and dry day frequencies", build_mosaic, "weather"),
     "treemap": ("Chapter 08", "Treemap", "px.treemap()", "Explore additive rainy-day observation counts", build_treemap, "weather"),
-    "map": ("Chapter 09", "Markers and map symbols", "folium.Map(); folium.Marker(); folium.CircleMarker()", "Map sampled climate statistics", build_map, "weather"),
+    "map": ("Chapter 09", "Markers and map symbols", "folium.Map(); folium.Marker(); folium.CircleMarker()", "Map uploaded climate statistics", build_map, "weather"),
 }
 
 
@@ -287,7 +287,7 @@ def interpretation(chart_id: str, table: pd.DataFrame, caveats: list[str], facts
     else:
         leader = table.sort_values("average_daily_rain_mm", ascending=False).iloc[0]
         finding = f"The highest mapped mean daily rainfall is {leader.average_daily_rain_mm:.1f} mm at {leader.location_name}, from {int(leader.rain_valid_days)} valid days."
-    return {"label": "Statistical Interpretation", "shows": REGISTRY[chart_id][3], "findings": finding, "evidence": f"The evidence table has {count} chart-input rows; the first 30 appear here and the full table is downloadable.", "relevance": "Compare sample locations and periods for further climate research; association does not establish a cause.", "limitations": caveats}
+    return {"label": "Statistical Interpretation", "shows": REGISTRY[chart_id][3], "findings": finding, "evidence": f"The evidence table has {count} chart-input rows; the first 30 appear here and the full table is downloadable.", "relevance": "Compare locations and periods for further climate research; association does not establish a cause.", "limitations": caveats}
 
 
 def code_for(chart_id: str) -> dict:

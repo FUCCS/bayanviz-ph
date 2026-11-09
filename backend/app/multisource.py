@@ -1,4 +1,4 @@
-"""Validated UTC daily integration of Open-Meteo ERA5 and NASA POWER point data."""
+"""Validated UTC daily integration of uploaded weather and solar data."""
 from __future__ import annotations
 
 import base64
@@ -16,7 +16,6 @@ import seaborn as sns
 
 from .catalog import LOCATIONS
 from .charts import RENDER_LOCK
-from .connectors import fetch_nasa, fetch_weather, parse_nasa_payload
 from .processing import WEATHER_COLUMNS, safe_number
 
 NASA_COLUMNS = ["nasa_solar_radiation_kwh_m2_day", "nasa_temperature_mean_c"]
@@ -26,7 +25,7 @@ MS_CHARTS = {
     "temp_compare": ("Temperature source comparison", "sns.lineplot()", "Inspect agreement between two modeled daily temperature estimates"),
     "solar_seasonal": ("Seasonal solar radiation", "sns.boxplot()", "Compare valid daily solar radiation by calendar month"),
     "multi_correlation": ("Multivariate climate correlation", "sns.heatmap()", "Inspect complete-case climate correlations"),
-    "solar_map": ("Solar radiation sample map", "folium.CircleMarker()", "Map sampled solar radiation without spatial interpolation"),
+    "solar_map": ("Solar radiation map", "folium.CircleMarker()", "Map uploaded solar radiation without spatial interpolation"),
 }
 
 
@@ -68,30 +67,30 @@ def normalize_nasa(frame: pd.DataFrame, metadata: dict) -> tuple[pd.DataFrame, d
 def validate_sources(primary: pd.DataFrame, secondary: pd.DataFrame | None, metadata: dict, requested_locations: list[str], primary_standard: str = "UTC") -> dict:
     """Report compatibility before any merge is attempted."""
     if primary.empty:
-        raise ValueError("Open-Meteo returned no daily observations")
+        raise ValueError("Uploaded weather has no daily observations")
     if "analysis_time_standard" not in primary or primary_standard != "UTC" or not primary["analysis_time_standard"].eq("UTC").all():
-        raise ValueError("Exact daily integration requires UTC Open-Meteo observations")
+        raise ValueError("Exact daily integration requires UTC weather observations")
     if primary.duplicated(["location_id", "date"]).any():
-        raise ValueError("Open-Meteo has duplicate location-date keys")
+        raise ValueError("Uploaded weather has duplicate location-date keys")
     if primary.date.isna().any():
-        raise ValueError("Open-Meteo returned invalid daily dates")
+        raise ValueError("Uploaded weather contains invalid daily dates")
     if set(primary.location_id) - set(requested_locations):
-        raise ValueError("Open-Meteo returned an unrequested location")
+        raise ValueError("Uploaded weather contains an unrequested location")
     first, last = str(primary.date.min().date()), str(primary.date.max().date())
     primary_keys = set(zip(primary.location_id, primary.date))
-    report = {"status": "Missing Secondary Data" if secondary is None else "Validated", "providers": ["Open-Meteo Historical Weather"] + (["NASA POWER"] if secondary is not None else []), "primary_dataset_version": "ERA5", "primary_rows": len(primary), "primary_coverage": [first, last], "daily_time_standard": "UTC", "requested_locations": [{key: LOCATIONS[loc][key] for key in ("id", "name", "province", "region", "latitude", "longitude")} for loc in requested_locations], "openmeteo_grid": primary[["location_id", "openmeteo_grid_latitude", "openmeteo_grid_longitude"]].drop_duplicates().to_dict("records") if {"openmeteo_grid_latitude", "openmeteo_grid_longitude"}.issubset(primary) else [], "nasa_grid": {loc: {"latitude": meta.get("grid_latitude"), "longitude": meta.get("grid_longitude")} for loc, meta in metadata.items()}, "nasa_parameter_metadata": {loc: meta.get("parameter_metadata", {}) for loc, meta in metadata.items()}, "nasa_dataset_versions": {loc: meta.get("dataset_version") for loc, meta in metadata.items()}, "primary_variables": [col for col in WEATHER_COLUMNS if col in primary and primary[col].notna().any()], "nasa_variables": [], "primary_missing_values": {col: int(primary[col].isna().sum()) for col in WEATHER_COLUMNS if col in primary}, "primary_duplicate_records": 0, "nasa_rows": 0, "nasa_missing_values": {}, "nasa_duplicate_records": 0, "matched_dates": 0, "unmatched_primary_dates": len(primary), "unmatched_nasa_dates": 0, "common_date_range": None, "warnings": ["Point samples can represent different provider grid cells; matching requested coordinates does not make grid resolution identical."]}
+    report = {"status": "Missing Secondary Data" if secondary is None else "Validated", "providers": ["Open-Meteo Historical Weather"] + (["NASA POWER"] if secondary is not None else []), "primary_dataset_version": "ERA5", "primary_rows": len(primary), "primary_coverage": [first, last], "daily_time_standard": "UTC", "requested_locations": [{key: LOCATIONS[loc][key] for key in ("id", "name", "province", "region", "latitude", "longitude")} for loc in requested_locations], "openmeteo_grid": primary[["location_id", "openmeteo_grid_latitude", "openmeteo_grid_longitude"]].drop_duplicates().to_dict("records") if {"openmeteo_grid_latitude", "openmeteo_grid_longitude"}.issubset(primary) else [], "nasa_grid": {loc: {"latitude": meta.get("grid_latitude"), "longitude": meta.get("grid_longitude")} for loc, meta in metadata.items()}, "nasa_parameter_metadata": {loc: meta.get("parameter_metadata", {}) for loc, meta in metadata.items()}, "nasa_dataset_versions": {loc: meta.get("dataset_version") for loc, meta in metadata.items()}, "primary_variables": [col for col in WEATHER_COLUMNS if col in primary and primary[col].notna().any()], "nasa_variables": [], "primary_missing_values": {col: int(primary[col].isna().sum()) for col in WEATHER_COLUMNS if col in primary}, "primary_duplicate_records": 0, "nasa_rows": 0, "nasa_missing_values": {}, "nasa_duplicate_records": 0, "matched_dates": 0, "unmatched_primary_dates": len(primary), "unmatched_nasa_dates": 0, "common_date_range": None, "warnings": ["Uploaded sources may have different spatial resolution; matching requested coordinates does not make their grids identical."]}
     if secondary is None:
         return report
     if secondary.empty:
-        raise ValueError("NASA POWER returned no daily observations")
+        raise ValueError("Uploaded solar data has no daily observations")
     if set(secondary.location_id) - set(requested_locations):
-        raise ValueError("NASA POWER returned an unrequested location")
+        raise ValueError("Uploaded solar data contains an unrequested location")
     if set(secondary.location_id) != set(metadata) or any(meta.get("time_standard") != "UTC" for meta in metadata.values()):
-        raise ValueError("Exact daily integration requires UTC NASA POWER observations")
+        raise ValueError("Exact daily integration requires UTC solar observations")
     if secondary.date.isna().any():
-        raise ValueError("NASA POWER returned invalid daily dates")
+        raise ValueError("Uploaded solar data contains invalid daily dates")
     if secondary.duplicated(["location_id", "date"]).any():
-        raise ValueError("NASA POWER has duplicate location-date keys")
+        raise ValueError("Uploaded solar data has duplicate location-date keys")
     secondary_keys = set(zip(secondary.location_id, secondary.date))
     common = primary_keys & secondary_keys
     if not common:
@@ -138,7 +137,7 @@ def prepare_multisource_chart(chart_id: str, frame: pd.DataFrame) -> tuple[pd.Da
     """Build chart evidence exclusively from the selected filtered UTC observations."""
     if chart_id not in MS_CHARTS:
         raise ValueError("Unknown multi-source chart")
-    caveats = ["Open-Meteo ERA5 and NASA POWER represent different modeled grids, not ground-truth weather stations.", "UTC daily alignment compares matching requested dates; provider grids and model definitions still differ.", "Association does not establish causation."]
+    caveats = ["Uploaded weather and solar sources may represent different modeled grids, not ground-truth stations.", "UTC daily alignment compares matching requested dates; provider grids and model definitions still differ.", "Association does not establish causation."]
     solar = "nasa_solar_radiation_kwh_m2_day"
     if chart_id == "temp_solar":
         table = paired_table(frame, "temperature_mean_c", solar)
@@ -170,7 +169,7 @@ def prepare_multisource_chart(chart_id: str, frame: pd.DataFrame) -> tuple[pd.Da
         grouped["latitude"] = grouped.location_id.map(lambda key: LOCATIONS[key]["latitude"])
         grouped["longitude"] = grouped.location_id.map(lambda key: LOCATIONS[key]["longitude"])
         grouped["location_name"] = grouped.location_id.map(lambda key: LOCATIONS[key]["name"])
-        grouped["source_status"] = np.where(grouped.valid_days.gt(0), "Open-Meteo + NASA POWER paired", "Open-Meteo primary only")
+        grouped["source_status"] = np.where(grouped.valid_days.gt(0), "Uploaded weather + solar paired", "Uploaded weather only")
         table = grouped
         units = "kWh/m²/day"
         facts = {"paired_observations": int(grouped.valid_days.sum()), "mapped_locations": len(grouped), "primary_only_locations": int(grouped.valid_days.eq(0).sum())}
@@ -184,7 +183,7 @@ def prepare_multisource_chart(chart_id: str, frame: pd.DataFrame) -> tuple[pd.Da
 def build_temp_solar(table: pd.DataFrame):
     fig, ax = plt.subplots(figsize=(8.4, 4.6))
     sns.scatterplot(data=table, x="nasa_solar_radiation_kwh_m2_day", y="temperature_mean_c", hue="location_id", ax=ax)
-    ax.set(xlabel="NASA POWER solar radiation (kWh/m²/day)", ylabel="Open-Meteo mean temperature (°C)", title="Temperature and solar radiation at paired sample dates")
+    ax.set(xlabel="Uploaded solar radiation (kWh/m²/day)", ylabel="Uploaded weather mean temperature (°C)", title="Temperature and solar radiation at paired dates")
     fig.tight_layout()
     return fig
 
@@ -192,7 +191,7 @@ def build_temp_solar(table: pd.DataFrame):
 def build_rain_solar(table: pd.DataFrame):
     fig, ax = plt.subplots(figsize=(8.4, 4.6))
     sns.scatterplot(data=table, x="nasa_solar_radiation_kwh_m2_day", y="precipitation_mm", size="temperature_mean_c", sizes=(25, 240), hue="location_id", ax=ax)
-    ax.set(xlabel="NASA POWER solar radiation (kWh/m²/day)", ylabel="Open-Meteo precipitation (mm/day)", title="Rainfall and solar radiation; bubble area represents mean temperature")
+    ax.set(xlabel="Uploaded solar radiation (kWh/m²/day)", ylabel="Uploaded weather precipitation (mm/day)", title="Rainfall and solar radiation; bubble area represents mean temperature")
     fig.tight_layout()
     return fig
 
@@ -206,7 +205,7 @@ def build_temp_compare(table: pd.DataFrame):
     low = min(table["temperature_mean_c"].min(), table["nasa_temperature_mean_c"].min())
     high = max(table["temperature_mean_c"].max(), table["nasa_temperature_mean_c"].max())
     axes[1].plot([low, high], [low, high], color="#777", linestyle="--", label="equal estimates")
-    axes[1].set(xlabel="NASA POWER mean temperature (°C)", ylabel="Open-Meteo mean temperature (°C)", title="Paired estimate agreement")
+    axes[1].set(xlabel="Uploaded solar-source mean temperature (°C)", ylabel="Uploaded weather mean temperature (°C)", title="Paired estimate agreement")
     fig.autofmt_xdate(rotation=25)
     fig.tight_layout()
     return fig
@@ -222,7 +221,7 @@ def build_solar_seasonal(table: pd.DataFrame):
     sns.boxplot(data=table, x="month", y=solar, ax=axes[1])
     axes[1].set(xlabel="Calendar month", ylabel="Daily kWh/m²/day", title="Daily distribution")
     sns.heatmap(matrix, annot=True, fmt=".1f", cmap="YlOrBr", ax=axes[2], cbar_kws={"label": "kWh/m²/day"})
-    axes[2].set(xlabel="Calendar month", ylabel="Sample location", title="Monthly mean by point")
+    axes[2].set(xlabel="Calendar month", ylabel="Location", title="Monthly mean by point")
     fig.tight_layout()
     return fig
 
@@ -239,15 +238,15 @@ def build_multi_correlation(table: pd.DataFrame):
 def build_solar_map(table: pd.DataFrame):
     center = [float(table.latitude.mean()), float(table.longitude.mean())]
     map_obj = folium.Map(location=center, zoom_start=6, tiles="OpenStreetMap", control_scale=True)
-    locations = folium.FeatureGroup(name="Sample locations and source status")
-    solar_layer = folium.FeatureGroup(name="NASA POWER solar radiation (kWh/m²/day)")
-    temperature_layer = folium.FeatureGroup(name="Open-Meteo mean temperature (°C)")
+    locations = folium.FeatureGroup(name="Locations and source status")
+    solar_layer = folium.FeatureGroup(name="Uploaded solar radiation (kWh/m²/day)")
+    temperature_layer = folium.FeatureGroup(name="Uploaded weather mean temperature (°C)")
     rain_layer = folium.FeatureGroup(name="Open-Meteo mean rainfall (mm/day)")
     for row in table.itertuples():
         temperature = f"{row.temperature_mean_c:.1f} °C" if pd.notna(row.temperature_mean_c) else "unavailable"
         rainfall = f"{row.precipitation_mean_mm_day:.1f} mm/day" if pd.notna(row.precipitation_mean_mm_day) else "unavailable"
         solar = f"{row.solar_mean:.2f} kWh/m²/day" if pd.notna(row.solar_mean) else "unavailable"
-        popup = f"<b>{html.escape(row.location_name)}</b><br>NASA solar: {solar}<br>Open-Meteo temperature: {temperature}<br>Open-Meteo rainfall: {rainfall}<br>{row.valid_days} paired / {row.primary_days} primary dates<br>{html.escape(row.source_status)}"
+        popup = f"<b>{html.escape(row.location_name)}</b><br>Solar: {solar}<br>Weather temperature: {temperature}<br>Weather rainfall: {rainfall}<br>{row.valid_days} paired / {row.primary_days} primary dates<br>{html.escape(row.source_status)}"
         coordinate = [row.latitude, row.longitude]
         folium.Marker(coordinate, popup=popup, tooltip=row.location_name).add_to(locations)
         if pd.notna(row.solar_mean):
@@ -278,21 +277,21 @@ def render_multisource_chart(chart_id: str, table: pd.DataFrame) -> dict:
 
 def multisource_code(chart_id: str) -> dict:
     title, function, objective = MS_CHARTS[chart_id]
-    pipeline = [fetch_weather, fetch_nasa, parse_nasa_payload, normalize_nasa, validate_sources, merge_sources, paired_table, pearson, prepare_multisource_chart]
+    pipeline = [normalize_nasa, validate_sources, merge_sources, paired_table, pearson, prepare_multisource_chart]
     return {"visualization": inspect.getsource(MS_BUILDERS[chart_id]), "preparation": "\n\n".join(inspect.getsource(step) for step in pipeline), "topic": {"chapter": "Climate integration", "topic": title, "library_function": function, "objective": objective}, "highlights": ["pd.merge(", function.split("(")[0]]}
 
 
 def multisource_interpretation(chart_id: str, table: pd.DataFrame, facts: dict, caveats: list[str]) -> dict:
     count = facts["paired_observations"]
     if chart_id == "temp_compare":
-        finding = f"Across {count} paired daily values, Open-Meteo minus NASA POWER mean difference is {facts['mean_difference_c']} °C; MAE {facts['mean_absolute_error_c']} °C and RMSE {facts['root_mean_squared_error_c']} °C. Neither model is ground truth."
+        finding = f"Across {count} paired daily values, Weather minus solar-source temperature mean difference is {facts['mean_difference_c']} °C; MAE {facts['mean_absolute_error_c']} °C and RMSE {facts['root_mean_squared_error_c']} °C. Neither model is ground truth."
     elif "pearson_r" in facts:
         r = facts["pearson_r"]
         finding = f"Pearson r = {r:.3f} across {count} valid paired daily values." if r is not None else f"Pearson correlation is unavailable for {count} paired values because there are fewer than three observations or a variable is constant."
     elif chart_id == "multi_correlation":
         finding = f"Correlation coefficients use {count} complete location-date rows; each cell has the same denominator."
     elif chart_id == "solar_map":
-        finding = f"{facts['mapped_locations']} sampled locations contain {count} valid paired solar observations."
+        finding = f"{facts['mapped_locations']} uploaded locations contain {count} valid paired solar observations."
     else:
         finding = f"The selected dates contain {count} valid daily solar measurements; mean {facts['mean_solar_kwh_m2_day']} kWh/m²/day."
     return {"label": "Statistical Interpretation", "shows": MS_CHARTS[chart_id][2], "findings": finding, "evidence": f"The evidence table contains {len(table)} chart-input rows; the first 30 are shown and the complete table is downloadable.", "relevance": "Use these point comparisons for climate education and further investigation, not causal attribution or province-wide averages.", "limitations": caveats}

@@ -1,12 +1,12 @@
 {
-  "version": "2026-11-08-sample-v1",
+  "version": "2026-11-09-location-v1",
   "classification_date": "2026-11-08",
-  "note": "Representative city coordinates are sample locations within each province, not province-wide measurements.",
+  "note": "Representative city coordinates are registered locations within each province, not province-wide measurements.",
   "locations": [
-    {"id":"dumaguete","name":"Dumaguete sample","province":"Negros Oriental","region":"Negros Island Region","latitude":9.3068,"longitude":123.3054,"source":"city-centre reference coordinate","scope":"sample point"},
-    {"id":"bacolod","name":"Bacolod sample","province":"Negros Occidental","region":"Negros Island Region","latitude":10.6765,"longitude":122.9509,"source":"city-centre reference coordinate","scope":"sample point"},
-    {"id":"cebu","name":"Cebu City sample","province":"Cebu","region":"Central Visayas","latitude":10.3157,"longitude":123.8854,"source":"city-centre reference coordinate","scope":"sample point"},
-    {"id":"tagbilaran","name":"Tagbilaran sample","province":"Bohol","region":"Central Visayas","latitude":9.6475,"longitude":123.8530,"source":"city-centre reference coordinate","scope":"sample point"},
-    {"id":"siquijor","name":"Siquijor sample","province":"Siquijor","region":"Negros Island Region","latitude":9.2150,"longitude":123.5150,"source":"city-centre reference coordinate","scope":"sample point"}
+    {"id":"dumaguete","name":"Dumaguete","province":"Negros Oriental","region":"Negros Island Region","latitude":9.3068,"longitude":123.3054,"source":"city-centre reference coordinate","scope":"location point"},
+    {"id":"bacolod","name":"Bacolod","province":"Negros Occidental","region":"Negros Island Region","latitude":10.6765,"longitude":122.9509,"source":"city-centre reference coordinate","scope":"location point"},
+    {"id":"cebu","name":"Cebu City","province":"Cebu","region":"Central Visayas","latitude":10.3157,"longitude":123.8854,"source":"city-centre reference coordinate","scope":"location point"},
+    {"id":"tagbilaran","name":"Tagbilaran","province":"Bohol","region":"Central Visayas","latitude":9.6475,"longitude":123.8530,"source":"city-centre reference coordinate","scope":"location point"},
+    {"id":"siquijor","name":"Siquijor","province":"Siquijor","region":"Negros Island Region","latitude":9.2150,"longitude":123.5150,"source":"city-centre reference coordinate","scope":"location point"}
   ]
 }

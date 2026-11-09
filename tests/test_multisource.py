@@ -15,6 +15,14 @@ from app.processing import prepare_weather
 client = TestClient(app)
 
 
+def seed_weather(header, frame):
+    csv = frame.drop(columns=["analysis_time_standard", "openmeteo_grid_latitude", "openmeteo_grid_longitude"], errors="ignore").to_csv(index=False)
+    preview = client.post("/api/upload/preview", headers=header, files={"file": ("weather.csv", csv, "text/csv")})
+    assert preview.status_code == 200, preview.text
+    used = client.post("/api/upload/use", headers=header, json={"upload_id": preview.json()["upload_id"], "time_standard": "UTC"})
+    assert used.status_code == 200, used.text
+
+
 def provider_frames():
     weather = prepare_weather(pd.DataFrame({
         "location_id": ["dumaguete"] * 4,
@@ -104,19 +112,15 @@ def test_api_validate_then_merge_chart_code_and_export(monkeypatch):
     weather, nasa, metadata, _ = provider_frames()
     raw_nasa = nasa[["location_id", "date", "nasa_solar_radiation", "nasa_temperature_mean_c"]]
 
-    async def fake_weather(*_args):
-        return weather, [], 0
-
-    async def fake_nasa(*_args):
-        return raw_nasa, metadata, [], 0
-
-    monkeypatch.setattr("app.main.fetch_weather", fake_weather)
-    monkeypatch.setattr("app.main.fetch_nasa", fake_nasa)
     sid = client.post("/api/session").json()["session_id"]
     header = {"X-Session-Id": sid}
+    seed_weather(header, weather)
+    solar_csv = raw_nasa.to_csv(index=False)
+    solar_preview = client.post("/api/upload/preview", headers=header, files={"file": ("solar.csv", solar_csv, "text/csv")}).json()
+    upload_fields = {"nasa_upload_id": solar_preview["upload_id"], "nasa_mapping": {column: column for column in raw_nasa.columns}, "nasa_solar_unit": "kWh/m^2/day", "nasa_temperature_unit": "C", "nasa_time_standard": "UTC"}
     early = client.post("/api/multisource/merge", headers=header, json={"validation_id": "unknown"})
     assert early.status_code == 409
-    validated = client.post("/api/multisource/validate", headers=header, json={"locations": ["dumaguete"], "start_date": "2020-01-01", "end_date": "2020-01-04"})
+    validated = client.post("/api/multisource/validate", headers=header, json={"locations": ["dumaguete"], "start_date": "2020-01-01", "end_date": "2020-01-04", **upload_fields})
     assert validated.status_code == 200, validated.text
     body = validated.json()
     assert body["report"]["matched_dates"] == 3
@@ -146,19 +150,16 @@ def test_api_validate_then_merge_chart_code_and_export(monkeypatch):
 def test_existing_openmeteo_analysis_still_works_without_nasa():
     sid = client.post("/api/session").json()["session_id"]
     header = {"X-Session-Id": sid}
-    assert client.post("/api/analysis", headers=header, json={"chart_id": "map"}).status_code == 200
+    assert client.post("/api/analysis", headers=header, json={"chart_id": "map"}).status_code == 422
     assert client.post("/api/analysis", headers=header, json={"chart_id": "temp_solar", "source": "session"}).status_code == 422
 
 
 def test_uploaded_nasa_json_keeps_provenance_and_merges(monkeypatch):
     weather, _, _, _ = provider_frames()
 
-    async def fake_weather(*_args):
-        return weather, [], 0
-
-    monkeypatch.setattr("app.main.fetch_weather", fake_weather)
     sid = client.post("/api/session").json()["session_id"]
     header = {"X-Session-Id": sid}
+    seed_weather(header, weather)
     payload = {"header": {"api": {"version": "uploaded-fixture"}, "time_standard": "UTC", "fill_value": -999}, "geometry": {"coordinates": [123.308, 9.306]}, "parameters": {"ALLSKY_SFC_SW_DWN": {"units": "kW-hr/m^2/day"}, "T2M": {"units": "C"}}, "properties": {"parameter": {"ALLSKY_SFC_SW_DWN": {"20200101": 4, "20200102": 5, "20200103": 6}, "T2M": {"20200101": 24, "20200102": 25, "20200103": 26}}}}
     upload = client.post("/api/upload/preview", headers=header, files={"file": ("power.json", json.dumps(payload), "application/json")})
     assert upload.status_code == 200, upload.text
@@ -175,12 +176,9 @@ def test_uploaded_nasa_json_keeps_provenance_and_merges(monkeypatch):
 def test_uploaded_tabular_secondary_requires_units_utc_and_mapping(monkeypatch):
     weather, _, _, _ = provider_frames()
 
-    async def fake_weather(*_args):
-        return weather, [], 0
-
-    monkeypatch.setattr("app.main.fetch_weather", fake_weather)
     sid = client.post("/api/session").json()["session_id"]
     header = {"X-Session-Id": sid}
+    seed_weather(header, weather)
     csv = "site,day,solar,temp\ndumaguete,2020-01-01,4,24\ndumaguete,2020-01-02,5,25\n"
     upload = client.post("/api/upload/preview", headers=header, files={"file": ("nasa.csv", csv, "text/csv")}).json()
     base = {"locations": ["dumaguete"], "start_date": "2020-01-01", "end_date": "2020-01-04", "nasa_upload_id": upload["upload_id"], "nasa_mapping": {"location_id": "site", "date": "day", "nasa_solar_radiation": "solar", "nasa_temperature_mean_c": "temp"}}

@@ -10,7 +10,6 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from app.catalog import weather_frame
 from app.charts import REGISTRY
 from app.main import app, parse_upload
 from app.processing import RAINY_DAY_MM, climate_summary, correlation_table, date_bounds, filter_weather, period_table, prepare_weather
@@ -19,7 +18,24 @@ client = TestClient(app)
 
 
 def session():
-    return {"X-Session-Id": client.post("/api/session").json()["session_id"]}
+    header = {"X-Session-Id": client.post("/api/session").json()["session_id"]}
+    dates = pd.date_range("2024-01-01", "2025-12-31", freq="D")
+    rows = []
+    for place, offset in (("dumaguete", 0), ("cebu", 2), ("bacolod", 1), ("tagbilaran", 1), ("siquijor", 2)):
+        for date in dates:
+            month = date.month
+            rows.append({"location_id": place, "date": date.date().isoformat(), "model": "test_fixture",
+                         "temperature_mean_c": 24 + offset + month / 2 + date.day % 4,
+                         "temperature_min_c": 21 + offset + month / 2,
+                         "temperature_max_c": 29 + offset + month / 2,
+                         "precipitation_mm": (month * 2 + date.day % 5) / 3,
+                         "wind_speed_max_kmh": 10 + month + date.day % 3})
+    csv = pd.DataFrame(rows).to_csv(index=False)
+    preview = client.post("/api/upload/preview", headers=header, files={"file": ("fixture.csv", csv, "text/csv")})
+    assert preview.status_code == 200, preview.text
+    used = client.post("/api/upload/use", headers=header, json={"upload_id": preview.json()["upload_id"], "time_standard": "UTC"})
+    assert used.status_code == 200, used.text
+    return header
 
 
 def sample():
@@ -152,8 +168,8 @@ def test_upload_is_private_weather_only_and_revalidates_dates():
     csv = b"location_id,date,model,temperature_mean_c,precipitation_mm,wind_speed_max_kmh\ndumaguete,2025-01-01,era5,27,2,12\ndumaguete,2025-01-02,era5,28,3,13\n"
     preview = client.post("/api/upload/preview", headers=a, files={"file": ("weather.csv", csv, "text/csv")}).json()
     assert preview["observation_period"] == ["2025-01-01", "2025-01-02"]
-    assert client.post("/api/upload/use", headers=b, json={"upload_id": preview["upload_id"]}).status_code == 404
-    used = client.post("/api/upload/use", headers=a, json={"upload_id": preview["upload_id"]})
+    assert client.post("/api/upload/use", headers=b, json={"upload_id": preview["upload_id"], "time_standard": "UTC"}).status_code == 404
+    used = client.post("/api/upload/use", headers=a, json={"upload_id": preview["upload_id"], "time_standard": "UTC"})
     assert used.status_code == 200, used.text
     assert used.json()["valid_records"] == 2
     info = client.post("/api/dataset", headers=a, json={"source":"session"}).json()
@@ -171,16 +187,10 @@ def test_open_meteo_json_adapter():
     assert clean.iloc[0].wind_speed_max_kmh == 18
 
 
-def test_live_fetch_failure_and_variable_validation(monkeypatch):
-    header = session()
-    invalid = client.post("/api/fetch/weather", headers=header, json={"locations": ["dumaguete"], "start_date": "2025-01-01", "end_date": "2025-01-03", "variables": ["unknown"]})
-    assert invalid.status_code == 400
-    async def unavailable(*_args):
-        return pd.DataFrame(), ["dumaguete: provider unavailable"], 0
-    monkeypatch.setattr("app.main.fetch_weather", unavailable)
-    response = client.post("/api/fetch/weather", headers=header, json={"locations": ["dumaguete"], "start_date": "2025-01-01", "end_date": "2025-01-03", "variables": ["temperature_mean_c"]})
-    assert response.status_code == 502
-    assert "provider unavailable" in response.text
+def test_external_weather_fetch_is_not_exposed():
+    header = {"X-Session-Id": client.post("/api/session").json()["session_id"]}
+    response = client.post("/api/fetch/weather", headers=header, json={"locations": ["dumaguete"]})
+    assert response.status_code == 404
 
 
 def test_exported_script_runs_independently(tmp_path: Path):
@@ -230,10 +240,10 @@ def test_summary_code_and_reproduction_package(tmp_path: Path):
     assert reproduced["total_precipitation_mm"] == shown.json()["summary"]["total_precipitation_mm"]
 
 
-def test_prepared_snapshot_is_real_and_climate_only():
-    weather = weather_frame()
-    assert len(weather) > 3000
-    assert set(weather.columns) == {"location_id","date","model","temperature_mean_c","temperature_min_c","temperature_max_c","precipitation_mm","wind_speed_max_kmh"}
+def test_no_bundled_dataset_and_climate_only():
+    header = {"X-Session-Id": client.post("/api/session").json()["session_id"]}
+    assert client.post("/api/dataset", headers=header, json={}).status_code == 422
+    assert client.get("/api/sources").json()["weather"]["records"] == 0
     catalog = client.get("/api/catalog").json()
     assert all(chart["needs"] == "weather" for chart in catalog["charts"] if chart["chapter"] in {"Chapter 08", "Chapter 09"})
     assert any(chart["needs"] == "merged" for chart in catalog["charts"])
