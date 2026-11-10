@@ -295,11 +295,12 @@ def test_summary_code_and_reproduction_package(tmp_path: Path):
     assert reproduced["total_precipitation_mm"] == shown.json()["summary"]["total_precipitation_mm"]
 
 
-def test_no_bundled_dataset_and_climate_only():
+def test_bundled_dataset_is_opt_in_and_climate_only():
     header = {"X-Session-Id": client.post("/api/session").json()["session_id"]}
     assert client.post("/api/dataset", headers=header, json={}).status_code == 422
-    assert client.get("/api/sources").json()["weather"]["records"] == 0
+    assert client.get("/api/sources").json()["weather"]["records"] == 65754
     catalog = client.get("/api/catalog").json()
+    assert len(catalog["bundled_dataset"]["locations"]) == 18
     assert all(chart["needs"] == "weather" for chart in catalog["charts"] if chart["chapter"] in {"Chapter 08", "Chapter 09"})
     assert any(chart["needs"] == "merged" for chart in catalog["charts"])
     assert "facilities" not in client.get("/api/sources").text.lower()

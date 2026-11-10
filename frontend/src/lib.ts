@@ -1,7 +1,7 @@
 export const API = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
 export type Chart = {id:string; chapter:string; topic:string; function:string; objective:string; needs:string}
 export type Location = {id:string;name:string;province:string;region:string;latitude:number;longitude:number}
-export type Catalog = {locations:Location[];charts:Chart[];variables:string[];upload_limit_mb:number;upload_limit_rows:number;upload_limit_columns:number;uploads_per_session:number;session_idle_seconds:number}
+export type Catalog = {locations:Location[];charts:Chart[];variables:string[];upload_limit_mb:number;upload_limit_rows:number;upload_limit_columns:number;uploads_per_session:number;session_idle_seconds:number;bundled_dataset:{locations:string[];observation_period:string[];weather_rows:number;nasa_rows:number;time_standard:string}}
 const weatherDaily:Record<string,string> = {temperature_mean_c:'temperature_2m_mean',temperature_min_c:'temperature_2m_min',temperature_max_c:'temperature_2m_max',precipitation_mm:'precipitation_sum',wind_speed_max_kmh:'wind_speed_10m_max',sunshine_duration_hours:'sunshine_duration',wind_gust_max_kmh:'wind_gusts_10m_max',precipitation_hours:'precipitation_hours',wind_direction_dominant_deg:'wind_direction_10m_dominant',shortwave_radiation_mj_m2:'shortwave_radiation_sum'}
 const weatherHourly:Record<string,string> = {relative_humidity_mean_pct:'relative_humidity_2m',apparent_temperature_mean_c:'apparent_temperature',cloud_cover_mean_pct:'cloud_cover',dew_point_mean_c:'dew_point_2m'}
 

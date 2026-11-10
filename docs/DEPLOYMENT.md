@@ -7,4 +7,4 @@ The frontend is hosted at [bayanviz.netlify.app](https://bayanviz.netlify.app/) 
 3. Verify a fresh session starts with no dataset. Upload a weather file, fetch a seven-day weather period, and switch between them using the Dataset dropdown.
 4. Validate a mixed upload/API multi-source selection, then inspect charts, maps, code, reports, and exports. The first request may wait for a free Render instance to wake; repeated provider requests can use the in-memory cache.
 
-Anonymous sessions and uploads are stored in process memory for three hours; a restart erases them. Multiple workers would need shared session storage. No observations are bundled with the application.
+Anonymous sessions and uploads are stored in process memory for three hours; a restart erases them. Multiple workers would need shared session storage. The checked 18-region Open-Meteo and NASA POWER source files and derived CSV/Parquet archives are committed under `dataset/` and remain available after a restart.

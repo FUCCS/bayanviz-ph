@@ -1,0 +1,20 @@
+[
+  {"id":"ph_ncr_01","name":"Manila regional point","province":"Metro Manila","region":"National Capital Region","latitude":14.600,"longitude":120.984},
+  {"id":"ph_car_01","name":"Baguio regional point","province":"Benguet","region":"Cordillera Administrative Region","latitude":16.402,"longitude":120.596},
+  {"id":"ph_r01_01","name":"Laoag regional point","province":"Ilocos Norte","region":"Ilocos Region","latitude":18.198,"longitude":120.596},
+  {"id":"ph_r02_01","name":"Tuguegarao regional point","province":"Cagayan","region":"Cagayan Valley","latitude":17.613,"longitude":121.727},
+  {"id":"ph_r03_01","name":"San Fernando regional point","province":"Pampanga","region":"Central Luzon","latitude":15.029,"longitude":120.690},
+  {"id":"ph_r04a_01","name":"Calamba regional point","province":"Laguna","region":"CALABARZON","latitude":14.212,"longitude":121.165},
+  {"id":"ph_mimaropa_01","name":"Puerto Princesa regional point","province":"Palawan","region":"MIMAROPA Region","latitude":9.739,"longitude":118.735},
+  {"id":"ph_r05_01","name":"Legazpi regional point","province":"Albay","region":"Bicol Region","latitude":13.139,"longitude":123.744},
+  {"id":"ph_r06_01","name":"Iloilo regional point","province":"Iloilo","region":"Western Visayas","latitude":10.720,"longitude":122.562},
+  {"id":"ph_r07_01","name":"Cebu regional point","province":"Cebu","region":"Central Visayas","latitude":10.316,"longitude":123.885},
+  {"id":"ph_r08_01","name":"Tacloban regional point","province":"Leyte","region":"Eastern Visayas","latitude":11.245,"longitude":125.004},
+  {"id":"ph_r09_01","name":"Pagadian regional point","province":"Zamboanga del Sur","region":"Zamboanga Peninsula","latitude":7.826,"longitude":123.437},
+  {"id":"ph_r10_01","name":"Cagayan de Oro regional point","province":"Misamis Oriental","region":"Northern Mindanao","latitude":8.454,"longitude":124.632},
+  {"id":"ph_r11_01","name":"Davao regional point","province":"Davao del Sur","region":"Davao Region","latitude":7.191,"longitude":125.455},
+  {"id":"ph_r12_01","name":"Koronadal regional point","province":"South Cotabato","region":"SOCCSKSARGEN","latitude":6.503,"longitude":124.847},
+  {"id":"ph_caraga_01","name":"Butuan regional point","province":"Agusan del Norte","region":"Caraga","latitude":8.947,"longitude":125.541},
+  {"id":"ph_barmm_01","name":"Cotabato regional point","province":"Maguindanao del Norte","region":"Bangsamoro Autonomous Region in Muslim Mindanao","latitude":7.205,"longitude":124.231},
+  {"id":"ph_nir_01","name":"Dumaguete regional point","province":"Negros Oriental","region":"Negros Island Region","latitude":9.306,"longitude":123.308}
+]

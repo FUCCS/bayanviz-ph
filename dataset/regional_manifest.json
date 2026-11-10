@@ -1,0 +1,366 @@
+{
+  "period": [
+    "2016-01-01",
+    "2025-12-31"
+  ],
+  "time_standard": "UTC",
+  "regional_points": 18,
+  "sources": [
+    {
+      "location_id": "ph_ncr_01",
+      "weather_file": "dataset/open-meteo/4400e52d1050eef44c1f3ca8730d583950a0a85f5d1aa8edcb5b09a1ce1d1166.json",
+      "weather_sha256": "4968ae37b102486aaf574f50ea1df71a5bf5596ed536e09d399b89e763388db5",
+      "nasa_file": "dataset/nasa_power/cd6c96d06722a89e4825ac36377c69cb056241cdbd5c80dac6475801c733a697.json",
+      "nasa_sha256": "81230c95db8387be304cafe7b3dbfb1cd346f0fef7e2ef0d384349920436f019",
+      "weather_grid": [
+        14.5,
+        121.0
+      ],
+      "nasa_point": [
+        14.6,
+        120.984
+      ]
+    },
+    {
+      "location_id": "ph_car_01",
+      "weather_file": "dataset/open-meteo/952a69f70b43850cdcfffb66512698df91cd93958423a7727f8a9fe6c2756537.json",
+      "weather_sha256": "a596f8312b5d8dd2bc65c70e20e5e6610b4e0f721be5e0a07375e5e4788c6d99",
+      "nasa_file": "dataset/nasa_power/7520bbbfd781cffeaaad19f0c3d7faced2029453e084bc5e3aa4a2bfaa1354ab.json",
+      "nasa_sha256": "69ff22144d4c2a288867cc11af97a8b3aded5961dba9582981d145406606ee08",
+      "weather_grid": [
+        16.5,
+        120.5
+      ],
+      "nasa_point": [
+        16.402,
+        120.596
+      ]
+    },
+    {
+      "location_id": "ph_r01_01",
+      "weather_file": "dataset/open-meteo/7270dcd2aa0c4b5ef9d661256a7d7a7ab935d24eb69461b851ca19a58770c296.json",
+      "weather_sha256": "d682b4464e08cf34e51c7c4cbd964f95f53aa000bc465694568eeb574e339420",
+      "nasa_file": "dataset/nasa_power/16e7f14d9f57baf759e58e55a1ae6eaeb54f6d5d0e3156a86660d3d3faa68dac.json",
+      "nasa_sha256": "f75697afdbbe8b315e87a9342b724939a2ef70a6304cdb2988ae9d479cb815d3",
+      "weather_grid": [
+        18.25,
+        120.75
+      ],
+      "nasa_point": [
+        18.198,
+        120.596
+      ]
+    },
+    {
+      "location_id": "ph_r02_01",
+      "weather_file": "dataset/open-meteo/fb3c231c8c6693112a56827bd47a571d43a8ef0db5b18ff03440a4a75bd7b33d.json",
+      "weather_sha256": "468bad72b07ae74da996c493a459854827b739e358089da302e428694a55b13f",
+      "nasa_file": "dataset/nasa_power/9533627b03064f075f1bb2988613860797e96b51a9f2c8f2419635c53c55e0c7.json",
+      "nasa_sha256": "96b5c8fc934d93470b45a732050fb9948a15e5920162595484d75118cdaab257",
+      "weather_grid": [
+        17.5,
+        121.75
+      ],
+      "nasa_point": [
+        17.613,
+        121.727
+      ]
+    },
+    {
+      "location_id": "ph_r03_01",
+      "weather_file": "dataset/open-meteo/82c64ee770127c22c98f70469548993f0e849e24e37c51868a6f7bef799b8bb8.json",
+      "weather_sha256": "8fb9e36e60568f018aa256ce0bb17e8ee2dbcf44842f905b8f4d26836c3619e2",
+      "nasa_file": "dataset/nasa_power/4c4f06e46be0a704e6de5cd099c283f3ba1dbf1acf347ef64a3ac28cb06f17e0.json",
+      "nasa_sha256": "959aa2f3b011d30a3a4ec594500672d6bd3400c1dd805ad43e2098535466796a",
+      "weather_grid": [
+        15.0,
+        120.75
+      ],
+      "nasa_point": [
+        15.029,
+        120.69
+      ]
+    },
+    {
+      "location_id": "ph_r04a_01",
+      "weather_file": "dataset/open-meteo/fb2f2dc73037daa0d34a98b2e9a10f3ab60182e35e357214976b0913fd3edb4d.json",
+      "weather_sha256": "fb4a992ae411f3a45238d873cc39a96b31305f1ed5ae60985e04725edd469d84",
+      "nasa_file": "dataset/nasa_power/0c78f819ddb548b93ae0bf5b438e2afe249d40eb011966026e8341e0303ba8e5.json",
+      "nasa_sha256": "d2b26b56b4d59351e25633661a272ccf43fd42fc5733740e076947616b4a84d8",
+      "weather_grid": [
+        14.25,
+        121.25
+      ],
+      "nasa_point": [
+        14.212,
+        121.165
+      ]
+    },
+    {
+      "location_id": "ph_mimaropa_01",
+      "weather_file": "dataset/open-meteo/1f887bf0a1fe8b2244d9ece18785e3b181c055e7dd14160b1a41a677aef48366.json",
+      "weather_sha256": "402cae72bb0cf19393e354e40ac62705a5605f8f112e5dd204bd447938290f1d",
+      "nasa_file": "dataset/nasa_power/1b93780847611c490bd2c776d4bf48006e8dfb1600dde21171b1e6a2368ee413.json",
+      "nasa_sha256": "528e70d3c2a7fdea2a39453ac1537d41fe6cd62bc2fb2dffef2cdd75ab5e66f3",
+      "weather_grid": [
+        9.75,
+        118.75
+      ],
+      "nasa_point": [
+        9.739,
+        118.735
+      ]
+    },
+    {
+      "location_id": "ph_r05_01",
+      "weather_file": "dataset/open-meteo/d5b2318bc138a050d8a52a54535b63338bd4e3123481a8e97d22019cd9ee1c24.json",
+      "weather_sha256": "e653e6030c3d488ab01e99dd070a192f65f6b8e0f6a8d59a7a2af72102542701",
+      "nasa_file": "dataset/nasa_power/8b702c7a540a515aa73c20678d5f7f935d96de8097d3c3d6d6266a7b6326587d.json",
+      "nasa_sha256": "6f14c8a153b6d43a6feb37fb712c2ef31003d03f6f5db09baec50212caa9d77a",
+      "weather_grid": [
+        13.25,
+        123.75
+      ],
+      "nasa_point": [
+        13.139,
+        123.744
+      ]
+    },
+    {
+      "location_id": "ph_r06_01",
+      "weather_file": "dataset/open-meteo/3c8855b2c80d36daab0fe8bc7420a93679940986a3607b31f595a1175837e420.json",
+      "weather_sha256": "15df70976bac955e8f1c920c9d08b749c9eb9be30ca30a8000bb88171b55e45e",
+      "nasa_file": "dataset/nasa_power/758607756324f11d4f59f34f2d3560114034d6ea9cc817a4d537fd9b53017e66.json",
+      "nasa_sha256": "59aebaa6f6c55474b289ce1e359d1ddc07999a253c5ad756165a4e1766978e85",
+      "weather_grid": [
+        10.75,
+        122.5
+      ],
+      "nasa_point": [
+        10.72,
+        122.562
+      ]
+    },
+    {
+      "location_id": "ph_r07_01",
+      "weather_file": "dataset/open-meteo/3155877fd33e91237849ae245e68f1f4bf43c50dbd10d44b08849b0b4ee75466.json",
+      "weather_sha256": "0f78fe5f68de75a3109c698f0c8d542ec5fc2b570b79e7c876cc38e67a3e4b63",
+      "nasa_file": "dataset/nasa_power/f3de6018ad20e9803a191fb6d61c475387d96e229939fdbdbc3c6ee0b436472e.json",
+      "nasa_sha256": "65dba37708eb05833c37cfa8575a65c129e2d558af6a53f5ee59c81fad79cefd",
+      "weather_grid": [
+        10.25,
+        123.75
+      ],
+      "nasa_point": [
+        10.316,
+        123.885
+      ]
+    },
+    {
+      "location_id": "ph_r08_01",
+      "weather_file": "dataset/open-meteo/9e3abf31304469e7638d8a274bb3f0aa881d3933bc554b71cdf4e456157afe02.json",
+      "weather_sha256": "d8d6d4e4f0613c31c4c8d49d541daf2654c519d59a541c62d0366998fc191dc1",
+      "nasa_file": "dataset/nasa_power/9d34ccfe3bf6710aee414048fa704d68fde17a1446c5cb544a0061dbc2bbbe9d.json",
+      "nasa_sha256": "e624c782be74848dc75c79a4388e6bdb5348cd5452c70edef2f2e5025a94919d",
+      "weather_grid": [
+        11.25,
+        125.25
+      ],
+      "nasa_point": [
+        11.245,
+        125.004
+      ]
+    },
+    {
+      "location_id": "ph_r09_01",
+      "weather_file": "dataset/open-meteo/062a4f1df8ff27ebf54bc593cebec809806bf6a061b2e4e71ac33b24982baa22.json",
+      "weather_sha256": "07080915c8131ec59d8366b00632e7b28501dfbb2ee785e3095904889f0d1714",
+      "nasa_file": "dataset/nasa_power/3ca9870418ab9123f88fe9c79c2eb4704abc522642782113ae236d6e05a57adb.json",
+      "nasa_sha256": "e3ce85445edceb85703177103e5e070f2cbe9bf41b20e402e8ff742a23ee64e2",
+      "weather_grid": [
+        8.0,
+        123.5
+      ],
+      "nasa_point": [
+        7.826,
+        123.437
+      ]
+    },
+    {
+      "location_id": "ph_r10_01",
+      "weather_file": "dataset/open-meteo/b15dc12d9fa627a4f713263c8025579be4b53ba806531ff80bdbaab35155bd8c.json",
+      "weather_sha256": "b2f5ff5ef99e5f9986a0fb8c1c2185865a055f27e2aa829b7cd4f62603d186d6",
+      "nasa_file": "dataset/nasa_power/621a7e239dfe0872c74c1574970714c3d047c7e4662924b16a3506215f241d72.json",
+      "nasa_sha256": "656b53358e5bb5013e880fbd10a6d5ccdebd7bbe3bd0b5fcc942044d6b9da8a6",
+      "weather_grid": [
+        8.5,
+        124.75
+      ],
+      "nasa_point": [
+        8.454,
+        124.632
+      ]
+    },
+    {
+      "location_id": "ph_r11_01",
+      "weather_file": "dataset/open-meteo/0a67645969aad9c845efbfa7bf8525bde4817e0c4b83df6b751a7f14781ffff9.json",
+      "weather_sha256": "297e9e99195b7226910d77e307d2488465afbd23e52a1fdf767f07456da2e760",
+      "nasa_file": "dataset/nasa_power/ff5bc42496301aa5aa94bf9a56593e47d52f02678ddc6ea46c4f94508ff776c6.json",
+      "nasa_sha256": "3ea2701de5c8ee621e4e544a8f09023002dda73e3a7f3e0b27b7117f14030e09",
+      "weather_grid": [
+        7.25,
+        125.5
+      ],
+      "nasa_point": [
+        7.191,
+        125.455
+      ]
+    },
+    {
+      "location_id": "ph_r12_01",
+      "weather_file": "dataset/open-meteo/1281c78d26a6a9c0dbd0868840aee6c78dd1a63e70ccb7669ef219867b361a39.json",
+      "weather_sha256": "e5effa47948a266002257ccc041e29ae0b79747fdb54481caa29517ea11f9439",
+      "nasa_file": "dataset/nasa_power/9a01d9242d9a4c2f1a56690965bf764130aa164f60cbfbeb4cbd99df8753183c.json",
+      "nasa_sha256": "d5ea358d06e78dfecc753f49a9742b3b779fde6598c3d93a3a3e46e3dcc90d4f",
+      "weather_grid": [
+        6.5,
+        124.75
+      ],
+      "nasa_point": [
+        6.503,
+        124.847
+      ]
+    },
+    {
+      "location_id": "ph_caraga_01",
+      "weather_file": "dataset/open-meteo/d7ee3bf22246db8ad3e776f3af6b050432f8fbadf1410515a1c73e119e3cd3b8.json",
+      "weather_sha256": "cf50ec2b6ab7b86720c5c3b89dfd95be02ae4b1b2a05aecb8382905e4dee39a9",
+      "nasa_file": "dataset/nasa_power/85e69de5a4522cb803e291e124c201c0f5d78221f15104b588601a43566fa468.json",
+      "nasa_sha256": "8b2684ebfd30ef937bc4cc20e075e81b63e86c42b6856234906e522c292b4486",
+      "weather_grid": [
+        9.0,
+        125.5
+      ],
+      "nasa_point": [
+        8.947,
+        125.541
+      ]
+    },
+    {
+      "location_id": "ph_barmm_01",
+      "weather_file": "dataset/open-meteo/a054c32e3b59837143773dfc19026e1a09df19958fc6edb2a922c4d4cb1c29ca.json",
+      "weather_sha256": "e406dc4e7fda2982afe9db0cfec196710aa947547de79662363ce2f146039876",
+      "nasa_file": "dataset/nasa_power/b5f9f06ac063cd6dfd0e6211cd9f42ea235fb1f668d5126c86d2cb4c3bba2a3b.json",
+      "nasa_sha256": "ffa7cb847c1c047a8d7623a697b47a7cc4e1f4fc2de62d35563cf72b1a7821e7",
+      "weather_grid": [
+        7.25,
+        124.25
+      ],
+      "nasa_point": [
+        7.205,
+        124.231
+      ]
+    },
+    {
+      "location_id": "ph_nir_01",
+      "weather_file": "dataset/open-meteo/7a86bdac5fe4b58762ecd1c9e10b843dd7a9d400b140e82aca797566862e1c70.json",
+      "weather_sha256": "513dc3085493c3406b936d28c9fe4f0c5acfcbaecf205224cbffa4ea520c4a72",
+      "nasa_file": "dataset/nasa_power/c5175da8b94244aa7ce121674524ce83f82bcd52e2dcba871b4111d492ebc62f.json",
+      "nasa_sha256": "e7fe4eef312856559557a49563af3b47f542dc2f48b710c826b66c87bcbe33c3",
+      "weather_grid": [
+        9.25,
+        123.25
+      ],
+      "nasa_point": [
+        9.306,
+        123.308
+      ]
+    }
+  ],
+  "outputs": {
+    "open_meteo": {
+      "rows": 65754,
+      "columns": [
+        "location_id",
+        "date",
+        "model",
+        "source",
+        "analysis_time_standard",
+        "latitude",
+        "longitude",
+        "openmeteo_grid_latitude",
+        "openmeteo_grid_longitude",
+        "temperature_mean_c",
+        "temperature_min_c",
+        "temperature_max_c",
+        "precipitation_mm",
+        "wind_speed_max_kmh",
+        "relative_humidity_mean_pct",
+        "apparent_temperature_mean_c",
+        "cloud_cover_mean_pct",
+        "sunshine_duration_hours",
+        "wind_gust_max_kmh",
+        "precipitation_hours",
+        "wind_direction_dominant_deg",
+        "dew_point_mean_c",
+        "shortwave_radiation_mj_m2"
+      ],
+      "missing_values": {
+        "location_id": 0,
+        "date": 0,
+        "model": 0,
+        "source": 0,
+        "analysis_time_standard": 0,
+        "latitude": 0,
+        "longitude": 0,
+        "openmeteo_grid_latitude": 0,
+        "openmeteo_grid_longitude": 0,
+        "temperature_mean_c": 0,
+        "temperature_min_c": 0,
+        "temperature_max_c": 0,
+        "precipitation_mm": 0,
+        "wind_speed_max_kmh": 0,
+        "relative_humidity_mean_pct": 0,
+        "apparent_temperature_mean_c": 0,
+        "cloud_cover_mean_pct": 0,
+        "sunshine_duration_hours": 0,
+        "wind_gust_max_kmh": 0,
+        "precipitation_hours": 0,
+        "wind_direction_dominant_deg": 0,
+        "dew_point_mean_c": 0,
+        "shortwave_radiation_mj_m2": 0
+      },
+      "csv_sha256": "de389adf9969d61fc106703cf7f085e45c009e96639b1d2dc5a8faf8230077a5",
+      "parquet_sha256": "89d8f49d9614a9b489347b5357fe1b047b7c8709e4d754af36b2f40255ae1359"
+    },
+    "nasa_power": {
+      "rows": 65754,
+      "columns": [
+        "location_id",
+        "date",
+        "source",
+        "time_standard",
+        "latitude",
+        "longitude",
+        "nasa_solar_radiation",
+        "nasa_temperature_mean_c",
+        "nasa_relative_humidity_pct",
+        "nasa_wind_speed_m_s"
+      ],
+      "missing_values": {
+        "location_id": 0,
+        "date": 0,
+        "source": 0,
+        "time_standard": 0,
+        "latitude": 0,
+        "longitude": 0,
+        "nasa_solar_radiation": 0,
+        "nasa_temperature_mean_c": 0,
+        "nasa_relative_humidity_pct": 0,
+        "nasa_wind_speed_m_s": 0
+      },
+      "csv_sha256": "8d97417f468e589cd7c459e7001f3dd5ac5a00b8a3dfbf1cab6376082b27206e",
+      "parquet_sha256": "b03ab5b0ffb88d9867807ed0b3a698b7116199ee62e8b4b838f3672d447ab9fc"
+    }
+  }
+}

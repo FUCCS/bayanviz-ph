@@ -19,7 +19,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from .catalog import LOCATIONS
+from .catalog import LOCATIONS, nearest_location
+from .bundled import load_bundle, manifest as bundled_manifest, summary as bundled_summary
 from .charts import PALETTE, REGISTRY as CHARTS, code_for, interpretation, prepare_chart, render_chart
 from .connectors import HOURLY_VARIABLES, MAX_WEATHER_DAYS, VARIABLES, fetch_nasa, fetch_weather, parse_nasa_payload, parse_weather_payload
 from .multisource import MS_BUILDERS, MS_CHARTS, merge_sources, multisource_code, multisource_interpretation, normalize_nasa, prepare_multisource_chart, render_multisource_chart, validate_sources
@@ -102,6 +103,10 @@ class ScopeRequest(BaseModel):
     end_date: date | None = None
 
 
+class SourceSelection(BaseModel):
+    source: str
+
+
 class MultiValidateRequest(BaseModel):
     locations: list[str] = Field(min_length=1, max_length=len(LOCATIONS))
     start_date: date
@@ -182,7 +187,7 @@ def health():
 def start_session():
     prune()
     token = secrets.token_urlsafe(32)
-    sessions[token] = {"expires": time.time() + SESSION_TTL, "uploads": {}, "weather": None, "primary_weather": None, "api_weather": None, "weather_source": None, "weather_filename": None, "weather_upload_id": None, "weather_units_confirmed": False, "retrieved_at": None, "requests": [], "multisource": None, "merged": None, "merge_quality": None}
+    sessions[token] = {"expires": time.time() + SESSION_TTL, "uploads": {}, "weather": None, "primary_weather": None, "api_weather": None, "bundled_selected": False, "active_source": None, "weather_source": None, "weather_filename": None, "weather_upload_id": None, "weather_units_confirmed": False, "retrieved_at": None, "requests": [], "multisource": None, "merged": None, "merge_quality": None}
     return {"session_id": token, "expires_in_seconds": SESSION_TTL}
 
 
@@ -195,7 +200,9 @@ def session_status(auth=Depends(session)):
         dates = pd.to_datetime(date_column, errors="coerce").dropna() if date_column is not None else pd.Series(dtype="datetime64[ns]")
         uploads.append({"upload_id": upload_id, "filename": frame.attrs.get("filename"), "rows": len(frame), "columns": list(frame.columns), "preview": frame.head(50).fillna("").astype(str).to_dict("records"), "missing_by_column": {str(col): int(frame[col].isna().sum()) for col in frame.columns}, "required_weather": ["location_id", "date", "model"], "observation_period": [str(dates.min().date()), str(dates.max().date())] if len(dates) else None})
     validated = state.get("multisource")
-    return {"session_id": token, "expires_in_seconds": SESSION_TTL, "uploads": uploads, "weather_upload_id": state.get("weather_upload_id"), "weather_units_confirmed": state.get("weather_units_confirmed", False), "upload_bounds": date_bounds(state["primary_weather"]) if state["primary_weather"] is not None else None, "api_bounds": date_bounds(state["api_weather"]) if state["api_weather"] is not None else None, "merged_bounds": date_bounds(state["merged"]) if state["merged"] is not None else None, "merge_quality": state.get("merge_quality"), "validation": {"validation_id": validated["validation_id"], "report": validated["report"], "selection": validated["selection"]} if validated else None}
+    bundle = bundled_summary() if state.get("bundled_selected") else None
+    bundled_bounds = {"min_date": bundle["observation_period"][0], "max_date": bundle["observation_period"][1], "records": bundle["weather_rows"], "locations": bundle["locations"]} if bundle else None
+    return {"session_id": token, "expires_in_seconds": SESSION_TTL, "uploads": uploads, "weather_upload_id": state.get("weather_upload_id"), "weather_units_confirmed": state.get("weather_units_confirmed", False), "upload_bounds": date_bounds(state["primary_weather"]) if state["primary_weather"] is not None else None, "api_bounds": date_bounds(state["api_weather"]) if state["api_weather"] is not None else None, "bundled_bounds": bundled_bounds, "active_source": state.get("active_source"), "merged_bounds": date_bounds(state["merged"]) if state["merged"] is not None else None, "merge_quality": state.get("merge_quality"), "validation": {"validation_id": validated["validation_id"], "report": validated["report"], "selection": validated["selection"]} if validated else None}
 
 
 @app.delete("/api/session")
@@ -216,6 +223,7 @@ def catalog():
         "charts": [{"id": key, "chapter": row[0], "topic": row[1], "function": row[2], "objective": row[3], "needs": row[5]} for key, row in CHARTS.items()] + [{"id": key, "chapter": "Climate integration", "topic": row[0], "function": row[1], "objective": row[2], "needs": "merged"} for key, row in MS_CHARTS.items()],
         "variables": CLIMATE_COLUMNS,
         "essential_variables": WEATHER_COLUMNS,
+        "bundled_dataset": bundled_summary(),
         "schema_version": SCHEMA_VERSION,
         "upload_limit_mb": MAX_UPLOAD_MB, "upload_limit_rows": MAX_UPLOAD_ROWS,
         "upload_limit_columns": MAX_UPLOAD_COLUMNS, "uploads_per_session": MAX_UPLOADS_PER_SESSION, "session_idle_seconds": SESSION_TTL,
@@ -225,12 +233,42 @@ def catalog():
 @app.get("/api/sources")
 def sources():
     return {
-        "weather": {"status": "Upload or API fetch required", "records": 0},
-        "solar": {"status": "Upload or API fetch required", "records": 0},
+        "weather": {"status": "Bundled regional file or upload or API fetch", "records": bundled_summary()["weather_rows"]},
+        "solar": {"status": "Bundled regional file or upload or API fetch", "records": bundled_summary()["nasa_rows"]},
         "live_weather": {"provider": "Open-Meteo Historical Weather", "model": "ERA5", "max_days": MAX_WEATHER_DAYS, "max_locations": 3},
         "live_solar": {"provider": "NASA POWER Daily", "time_standard": "UTC", "max_days": 367, "max_locations": 3},
-        "coverage": "No dataset is bundled. Upload source files or fetch a short API period to begin.",
+        "coverage": "18 regional points, 2016–2025, from supplied Open-Meteo and NASA POWER files. Upload files or fetch a live API period as alternatives.",
     }
+
+
+@app.post("/api/bundled/select")
+def select_bundled(auth=Depends(session)):
+    token, state = auth
+    try:
+        bundle = load_bundle()
+    except (OSError, KeyError, ValueError) as exc:
+        raise HTTPException(503, f"Bundled regional data is unavailable: {exc}") from exc
+    validation_id = secrets.token_urlsafe(16)
+    selected = bundled_summary()
+    state["bundled_selected"] = True
+    state["active_source"] = "bundled"
+    state["weather"] = bundle.merged
+    state["weather_source"] = "Bundled Open-Meteo ERA5 + NASA POWER"
+    state["merged"] = bundle.merged
+    state["merge_quality"] = bundle.quality
+    state["retrieved_at"] = None
+    state["multisource"] = {"validation_id": validation_id, "primary": bundle.weather, "secondary": bundle.nasa,
+                            "metadata": bundle.metadata, "report": bundle.report,
+                            "selection": {"locations": selected["locations"], "start_date": selected["observation_period"][0],
+                                          "end_date": selected["observation_period"][1], "weather_source": "bundled",
+                                          "nasa_source": "bundled", "include_nasa": True, "method": "merge"},
+                            "retrieved_at": None}
+    for key, value in list(results.items()):
+        if value["session_id"] == token:
+            del results[key]
+    return {"status": "Bundled Dataset", "source": state["weather_source"], "records": selected["weather_rows"],
+            "observation_period": selected["observation_period"], "locations": selected["locations"],
+            "merge_quality": bundle.quality, "report": bundle.report}
 
 
 def selected_weather(source: str, state: dict) -> tuple[pd.DataFrame, str, dict]:
@@ -240,14 +278,31 @@ def selected_weather(source: str, state: dict) -> tuple[pd.DataFrame, str, dict]
     elif source == "api":
         frame = state["api_weather"]
         label = "Open-Meteo ERA5 API"
+    elif source == "bundled":
+        frame = load_bundle().merged
+        label = "Bundled Open-Meteo ERA5 + NASA POWER"
     elif source == "session":
         frame = state["weather"]
         label = state["weather_source"]
     else:
-        raise ValueError("Choose an uploaded or API dataset")
+        raise ValueError("Choose an uploaded, bundled, or API dataset")
     if frame is None:
         raise ValueError(f"No {source} weather dataset is loaded; upload a file or fetch from the API first")
-    return frame.copy(), label, {"retrieved_at_utc": state["retrieved_at"]}
+    shared_bundle = source == "bundled" or (source == "session" and state.get("bundled_selected") and frame is state.get("merged"))
+    return frame.copy(deep=not shared_bundle), label, {"retrieved_at_utc": None if source == "bundled" else state["retrieved_at"]}
+
+
+@app.post("/api/session/source")
+def select_source(request: SourceSelection, auth=Depends(session)):
+    _, state = auth
+    if request.source not in {"upload", "api", "session", "bundled"}:
+        raise HTTPException(400, "Choose an uploaded, bundled, merged, or API dataset")
+    try:
+        weather, _, _ = selected_weather(request.source, state)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    state["active_source"] = request.source
+    return {"source": request.source, **date_bounds(weather)}
 
 
 CHART_REQUIREMENTS = {
@@ -386,6 +441,7 @@ def save_fetched_weather(token: str, state: dict, frame: pd.DataFrame, errors: l
     state["api_weather"] = cleaned.copy()
     state["api_variables"] = set(variables)
     state["weather"] = cleaned
+    state["active_source"] = "api"
     state["weather_source"] = source
     state["retrieved_at"] = datetime.now(timezone.utc).isoformat()
     state["multisource"] = None
@@ -445,10 +501,12 @@ async def multisource_validate(request: MultiValidateRequest, auth=Depends(sessi
         raise HTTPException(400, "Choose Merge Datasets or Compare Data Sources")
     if not request.weather_variables or set(request.weather_variables) - set(CLIMATE_COLUMNS):
         raise HTTPException(400, "Choose supported weather variables")
-    if request.weather_source not in {"upload", "api"} or request.nasa_source not in {"upload", "api"}:
-        raise HTTPException(400, "Choose an upload or API source")
+    if request.weather_source not in {"upload", "api", "bundled"} or request.nasa_source not in {"upload", "api", "bundled"}:
+        raise HTTPException(400, "Choose an uploaded, bundled, or API source")
     if len(set(request.locations)) != len(request.locations) or set(request.locations) - set(LOCATIONS):
         raise HTTPException(400, "Choose distinct registered locations")
+    if (request.weather_source == "bundled" or (request.include_nasa and request.nasa_source == "bundled")) and set(request.locations) - set(bundled_summary()["locations"]):
+        raise HTTPException(400, "Bundled sources contain only the 18 registered regional sampling points")
     if len(request.locations) > 3 and (request.weather_source == "api" or (request.include_nasa and request.nasa_source == "api")):
         raise HTTPException(400, "Live API integration supports up to three locations; upload both CSV files for nationwide analysis")
     if not request.include_nasa and request.method == "compare":
@@ -468,10 +526,17 @@ async def multisource_validate(request: MultiValidateRequest, auth=Depends(sessi
                 raise ValueError("Uploaded secondary dataset is not in this anonymous session")
             nasa_raw, metadata = mapped_nasa_upload(stored, request)
             nasa_task = asyncio.sleep(0, result=(nasa_raw, metadata, [], 0))
+        elif request.nasa_source == "bundled":
+            bundle = load_bundle()
+            nasa_raw = bundle.nasa[bundle.nasa.location_id.isin(request.locations) & bundle.nasa.date.between(pd.Timestamp(request.start_date), pd.Timestamp(request.end_date))].copy()
+            metadata = {key: bundle.metadata[key] for key in request.locations}
+            nasa_task = asyncio.sleep(0, result=(nasa_raw, metadata, [], len(request.locations)))
         else:
             nasa_task = fetch_nasa(request.locations, request.start_date, request.end_date, request.nasa_variables)
         if request.weather_source == "upload":
             weather_task = asyncio.sleep(0, result=(state["primary_weather"], [], 0))
+        elif request.weather_source == "bundled":
+            weather_task = asyncio.sleep(0, result=(load_bundle().weather, [], len(request.locations)))
         else:
             cached_weather = state.get("api_weather")
             dates = pd.date_range(request.start_date, request.end_date)
@@ -501,10 +566,10 @@ async def multisource_validate(request: MultiValidateRequest, auth=Depends(sessi
         else:
             nasa, metadata, transform = None, {}, None
         report = validate_sources(weather, nasa, metadata, request.locations)
-        report["providers"] = ["Uploaded weather dataset" if request.weather_source == "upload" else "Open-Meteo Historical Weather"] + (["Uploaded secondary climate dataset" if request.nasa_source == "upload" else "NASA POWER"] if request.include_nasa else [])
+        report["providers"] = [{"upload": "Uploaded weather dataset", "api": "Open-Meteo Historical Weather", "bundled": "Bundled Open-Meteo ERA5"}[request.weather_source]] + ([{"upload": "Uploaded secondary climate dataset", "api": "NASA POWER", "bundled": "Bundled NASA POWER"}[request.nasa_source]] if request.include_nasa else [])
         report["primary_dataset_version"] = "uploaded-declared" if request.weather_source == "upload" else "ERA5"
-        report["primary_origin"] = "user-upload" if request.weather_source == "upload" else "Open-Meteo API"
-        report["secondary_origin"] = ("user-upload" if request.nasa_source == "upload" else "NASA POWER API") if request.include_nasa else None
+        report["primary_origin"] = {"upload": "user-upload", "api": "Open-Meteo API", "bundled": "supplied-provider-files"}[request.weather_source]
+        report["secondary_origin"] = {"upload": "user-upload", "api": "NASA POWER API", "bundled": "supplied-provider-files"}[request.nasa_source] if request.include_nasa else None
         report["primary_filename"] = state.get("weather_filename") if request.weather_source == "upload" else None
         report["secondary_filename"] = stored.attrs.get("filename") if stored is not None else None
         if request.weather_source == "upload" or (request.include_nasa and request.nasa_source == "upload"):
@@ -538,6 +603,7 @@ def multisource_merge(request: MultiMergeRequest, auth=Depends(session)):
     state["merged"] = merged
     state["merge_quality"] = quality
     state["weather"] = merged
+    state["active_source"] = "session"
     state["weather_source"] = " + ".join(validated["report"]["providers"])
     state["retrieved_at"] = validated["retrieved_at"]
     for key, value in list(results.items()):
@@ -597,7 +663,7 @@ def parse_upload(name: str, content: BinaryIO | bytes) -> pd.DataFrame:
             lon, lat = coordinates[:2]
             if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)) or pd.isna(lat) or pd.isna(lon):
                 raise ValueError("NASA JSON has invalid point coordinates")
-            nearby = min(LOCATIONS.values(), key=lambda loc: (loc["latitude"] - lat)**2 + (loc["longitude"] - lon)**2)
+            nearby = nearest_location(lat, lon)
             if abs(nearby["latitude"] - lat) > 0.75 or abs(nearby["longitude"] - lon) > 0.75:
                 raise ValueError("NASA JSON point is more than 0.75° from every registered location; use a matching sampling point or a CSV with registered location_id")
             available_parameters = payload["properties"].get("parameter", {})
@@ -635,7 +701,7 @@ def parse_upload(name: str, content: BinaryIO | bytes) -> pd.DataFrame:
             lat, lon = payload.get("latitude"), payload.get("longitude")
             if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)) or pd.isna(lat) or pd.isna(lon):
                 raise ValueError("Open-Meteo JSON needs numeric latitude and longitude to match a registered location")
-            nearby = min(LOCATIONS.values(), key=lambda loc: (loc["latitude"] - lat)**2 + (loc["longitude"] - lon)**2)
+            nearby = nearest_location(lat, lon)
             if abs(nearby["latitude"] - lat) > 0.75 or abs(nearby["longitude"] - lon) > 0.75:
                 raise ValueError("Open-Meteo JSON point is more than 0.75° from every registered location; use a matching sampling point or a CSV with registered location_id")
             frame["location_id"] = nearby["id"]
@@ -770,6 +836,7 @@ def use_upload(request: UseUploadRequest, auth=Depends(session)):
         if value["session_id"] == token:
             del results[key]
     state["weather"] = cleaned
+    state["active_source"] = "upload"
     state["primary_weather"] = cleaned
     state["weather_filename"] = df.attrs.get("filename")
     state["weather_upload_id"] = request.upload_id
@@ -786,8 +853,16 @@ def analyze(request: AnalysisRequest, auth=Depends(session)):
     if request.chart_id not in CHARTS and not integrated:
         raise HTTPException(404, "Unknown chart")
     try:
-        if integrated and (request.source != "session" or state.get("merged") is None or (state.get("multisource") or {}).get("secondary") is None):
-            raise ValueError("Validate and merge weather and solar data before this analysis")
+        validated = None
+        if integrated:
+            if request.source == "bundled":
+                bundle = load_bundle()
+                validated = {"primary": bundle.weather, "secondary": bundle.nasa, "report": bundle.report,
+                             "selection": {"weather_source": "bundled", "nasa_source": "bundled"}, "retrieved_at": None}
+            elif request.source == "session" and state.get("merged") is not None and (state.get("multisource") or {}).get("secondary") is not None:
+                validated = state["multisource"]
+            else:
+                raise ValueError("Validate and merge weather and solar data before this analysis")
         weather, weather_status, _ = selected_weather(request.source, state)
         unknown = set(request.locations) - set(weather.location_id.unique())
         if unknown:
@@ -795,7 +870,7 @@ def analyze(request: AnalysisRequest, auth=Depends(session)):
         weather = filter_weather(weather, request.locations, str(request.start_date) if request.start_date else None, str(request.end_date) if request.end_date else None)
         if integrated:
             table, units, facts, caveats = prepare_multisource_chart(request.chart_id, weather)
-            if state["multisource"]["report"].get("secondary_origin") == "user-upload":
+            if validated["report"].get("secondary_origin") == "user-upload":
                 caveats.append("Uploaded source values and declared units/time standard were supplied by a visitor and have not been independently verified.")
         else:
             table, units, caveats, facts = prepare_chart(request.chart_id, weather, request.variable, request.aggregation, request.relationship_aggregation, request.hot_threshold, request.wind_threshold)
@@ -805,8 +880,10 @@ def analyze(request: AnalysisRequest, auth=Depends(session)):
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     filters = request.model_dump(mode="json")
-    version = f"weather:{hashlib.sha256(weather.to_csv(index=False).encode()).hexdigest()[:12]}"
-    source_list = state["multisource"]["report"]["providers"] if integrated else [weather_status]
+    shared_bundle = request.source == "bundled" or (request.source == "session" and state.get("bundled_selected") and state.get("weather") is state.get("merged"))
+    version = (f"weather:bundled-{bundled_manifest()['outputs']['open_meteo']['parquet_sha256'][:12]}-{filter_hash(filters)[:8]}"
+               if shared_bundle else f"weather:{hashlib.sha256(weather.to_csv(index=False).encode()).hexdigest()[:12]}")
+    source_list = validated["report"]["providers"] if integrated else [weather_status]
     result_id = secrets.token_urlsafe(24)
     record = {
         "analysis_id": result_id, "dataset_version": version, "filter_hash": filter_hash(filters), "chart_id": request.chart_id,
@@ -820,7 +897,6 @@ def analyze(request: AnalysisRequest, auth=Depends(session)):
         "session_id": token, "expires": time.time() + SESSION_TTL, "table": table,
     }
     if integrated:
-        validated = state["multisource"]
         if validated["report"].get("secondary_origin") == "user-upload":
             record["python_source"]["preparation"] = inspect.getsource(mapped_nasa_upload) + "\n\n" + record["python_source"]["preparation"]
         record["primary_input"] = validated["primary"]
